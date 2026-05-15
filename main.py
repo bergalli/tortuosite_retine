@@ -100,7 +100,8 @@ def run_pipeline(
     method: str = "deep",
     vessel_percentile: float = 95.0,
     vessel_low_percentile: float | None = 90.0,
-    deep_threshold: float = 0.35,
+    deep_threshold: float = 0.30,
+    deep_modality: str = "CFP",
 ):
     image_path = Path(image_path)
     output_csv = Path(output_csv)
@@ -126,12 +127,15 @@ def run_pipeline(
 
     # 4. Segmentation des vaisseaux
     if method == "deep":
-        print("Méthode utilisée : deep learning")
+        print("Méthode utilisée : deep learning DCP")
+        print(f"Modalité DCP : {deep_modality}")
 
         vessel_prob = predict_vessels_deep(
             image,
             mask=fundus_mask,
+            modality=deep_modality,
         )
+
         save_intermediate_image(
             vessel_prob,
             intermediate_dir / "04_deep_vessel_probability.png",
@@ -152,6 +156,7 @@ def run_pipeline(
             preprocessed,
             mask=fundus_mask,
         )
+
         save_intermediate_image(
             vesselness,
             intermediate_dir / "04_vesselness.png",
@@ -163,6 +168,7 @@ def run_pipeline(
             threshold_percentile=vessel_percentile,
             low_threshold_percentile=vessel_low_percentile,
         )
+
         save_intermediate_image(
             binary,
             intermediate_dir / "05_binary_mask.png",
@@ -172,6 +178,7 @@ def run_pipeline(
         raise ValueError(
             f"Méthode inconnue : {method}. Utilise 'deep' ou 'classical'."
         )
+
 
     # 5. Nettoyage
     cleaned_binary = clean_binary_mask(
@@ -249,7 +256,8 @@ def parse_args():
     parser.add_argument(
         "--deep-threshold",
         type=float,
-        default=0.35,
+        default=0.30,
+        help="Seuil de probabilité pour le modèle deep learning",
     )
 
     parser.add_argument(
@@ -269,7 +277,12 @@ def parse_args():
         type=float,
         default=90.0,
     )
-
+    parser.add_argument(
+        "--deep-modality",
+        choices=["CFP", "UWF", "FFA", "SLO", "OCTA"],
+        default="CFP",
+        help="Modalité pour le modèle DCP : CFP ou UWF principalement.",
+    )
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -283,4 +296,5 @@ if __name__ == "__main__":
         vessel_percentile=args.vessel_percentile,
         vessel_low_percentile=args.vessel_low_percentile,
         deep_threshold=args.deep_threshold,
+        deep_modality=args.deep_modality,
     )
