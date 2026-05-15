@@ -28,6 +28,7 @@ from analyse import (
     analyze_skeleton_tortuosity,
     select_first_significant_branches,
 )
+from deep_model import predict_vessels_deep
 
 
 def save_intermediate_image(
@@ -96,11 +97,15 @@ def run_pipeline(
     output_csv: str,
     max_branches: int = 3,
     output_dir: str | None = None,
+    method: str = "deep",
     vessel_percentile: float = 95.0,
     vessel_low_percentile: float | None = 90.0,
+    deep_threshold: float = 0.30,
+    deep_modality: str = "CFP",
 ):
     image_path = Path(image_path)
     output_csv = Path(output_csv)
+
     intermediate_dir = get_intermediate_dir(output_csv, output_dir)
     intermediate_dir.mkdir(parents=True, exist_ok=True)
 
@@ -111,31 +116,89 @@ def run_pipeline(
     # 2. Extraire canal vert
     green = extract_green_channel(image)
     save_intermediate_image(green, intermediate_dir / "02_green_channel.png")
+
+    # 2bis. Masque du champ rétinien
     fundus_mask = build_fundus_mask(green)
     save_intermediate_image(fundus_mask, intermediate_dir / "02b_fundus_mask.png")
 
-    # 3. Prétraitement : contraste + flou
+    # 3. Prétraitement classique
     preprocessed = preprocess_green_channel(green)
     save_intermediate_image(preprocessed, intermediate_dir / "03_preprocessed.png")
 
-    # 4. Détection des vaisseaux
-    vesselness = detect_vessels(preprocessed, mask=fundus_mask)
-    save_intermediate_image(vesselness, intermediate_dir / "04_vesselness.png")
+    # 4. Segmentation des vaisseaux
+    if method == "deep":
+        print("Méthode utilisée : deep learning DCP")
+        print(f"Modalité DCP : {deep_modality}")
 
-    # 5. Binarisation + nettoyage
-    binary = binarize_vessels(
-        vesselness,
+        vessel_prob = predict_vessels_deep(
+            image,
+            mask=fundus_mask,
+            modality=deep_modality,
+        )
+
+        save_intermediate_image(
+            vessel_prob,
+            intermediate_dir / "04_deep_vessel_probability.png",
+        )
+
+        binary = vessel_prob > deep_threshold
+        binary &= fundus_mask
+
+        save_intermediate_image(
+            binary,
+            intermediate_dir / "05_binary_mask.png",
+        )
+
+    elif method == "classical":
+        print("Méthode utilisée : classique Frangi")
+
+        vesselness = detect_vessels(
+            preprocessed,
+            mask=fundus_mask,
+        )
+
+        save_intermediate_image(
+            vesselness,
+            intermediate_dir / "04_vesselness.png",
+        )
+
+        binary = binarize_vessels(
+            vesselness,
+            mask=fundus_mask,
+            threshold_percentile=vessel_percentile,
+            low_threshold_percentile=vessel_low_percentile,
+        )
+
+        save_intermediate_image(
+            binary,
+            intermediate_dir / "05_binary_mask.png",
+        )
+
+    else:
+        raise ValueError(
+            f"Méthode inconnue : {method}. Utilise 'deep' ou 'classical'."
+        )
+
+
+    # 5. Nettoyage
+    cleaned_binary = clean_binary_mask(
+        binary,
         mask=fundus_mask,
-        threshold_percentile=vessel_percentile,
-        low_threshold_percentile=vessel_low_percentile,
     )
-    save_intermediate_image(binary, intermediate_dir / "05_binary_mask.png")
-    cleaned_binary = clean_binary_mask(binary, mask=fundus_mask)
-    save_intermediate_image(cleaned_binary, intermediate_dir / "06_cleaned_mask.png")
+    save_intermediate_image(
+        cleaned_binary,
+        intermediate_dir / "06_cleaned_mask.png",
+    )
 
     # 6. Skeletonisation
     skeleton = skeletonize_mask(cleaned_binary)
-    save_intermediate_image(skeleton, intermediate_dir / "07_skeleton.png", dilate_kernel_size=3)
+
+    save_intermediate_image(
+        skeleton,
+        intermediate_dir / "07_skeleton.png",
+        dilate_kernel_size=3,
+    )
+
     save_intermediate_image(
         create_skeleton_overlay(image, skeleton),
         intermediate_dir / "07b_skeleton_overlay.png",
@@ -143,70 +206,95 @@ def run_pipeline(
 
     # 7. Analyse squelette + tortuosité
     summary = analyze_skeleton_tortuosity(skeleton)
-    summary.to_csv(intermediate_dir / "08_full_skeleton_summary.csv", index=False)
+    summary.to_csv(
+        intermediate_dir / "08_full_skeleton_summary.csv",
+        index=False,
+    )
 
-    # 8. Garder les 3 premières branches significatives
+    # 8. Garder les premières branches significatives
     selected = select_first_significant_branches(
         summary,
         max_branches=max_branches,
         tortuosity_threshold=1.05,
     )
 
-    # 9. Export CSV
+    # 9. Export CSV final
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     selected.to_csv(output_csv, index=False)
 
     print(f"Résultats sauvegardés dans : {output_csv}")
     print(f"Étapes intermédiaires sauvegardées dans : {intermediate_dir}")
+
     return selected
+
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--image",
         default="demo/test.png",
-        help="Chemin vers l'image PNG/TIF/JPG (défaut : demo/test.png)",
     )
+
     parser.add_argument(
         "--output",
         default="demo/results.csv",
-        help="Chemin du CSV de sortie (défaut : demo/results.csv)",
     )
+
     parser.add_argument(
         "--output-dir",
         default=None,
-        help="Dossier des images intermédiaires (défaut : dossier output à côté du CSV)",
     )
-    parser.add_argument("--max-branches", type=int, default=3, help="Nombre de branches à conserver")
+
+    parser.add_argument(
+        "--method",
+        choices=["deep", "classical"],
+        default="deep",
+    )
+
+    parser.add_argument(
+        "--deep-threshold",
+        type=float,
+        default=0.30,
+        help="Seuil de probabilité pour le modèle deep learning",
+    )
+
+    parser.add_argument(
+        "--max-branches",
+        type=int,
+        default=3,
+    )
+
     parser.add_argument(
         "--vessel-percentile",
         type=float,
         default=95.0,
-        help=(
-            "Seuil haut percentile sur la vesselness : plus bas = plus de vaisseaux "
-            "(défaut : 95)"
-        ),
     )
+
     parser.add_argument(
         "--vessel-low-percentile",
         type=float,
         default=90.0,
-        help=(
-            "Seuil bas percentile pour l'hystérésis : plus bas = extensions plus longues "
-            "(défaut : 90 ; mettre >= --vessel-percentile pour désactiver)"
-        ),
+    )
+    parser.add_argument(
+        "--deep-modality",
+        choices=["CFP", "UWF", "FFA", "SLO", "OCTA"],
+        default="CFP",
+        help="Modalité pour le modèle DCP : CFP ou UWF principalement.",
     )
     return parser.parse_args()
-
 
 if __name__ == "__main__":
     args = parse_args()
     run_pipeline(
-        args.image,
-        args.output,
-        args.max_branches,
-        args.output_dir,
-        args.vessel_percentile,
-        args.vessel_low_percentile,
+        image_path=args.image,
+        output_csv=args.output,
+        max_branches=args.max_branches,
+        output_dir=args.output_dir,
+        method=args.method,
+        vessel_percentile=args.vessel_percentile,
+        vessel_low_percentile=args.vessel_low_percentile,
+        deep_threshold=args.deep_threshold,
+        deep_modality=args.deep_modality,
     )
