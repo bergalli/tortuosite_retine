@@ -104,25 +104,44 @@ BRANCH_VIEWER = st.components.v2.component(
 
       if (data.showSkeleton) {
         (data.branches ?? []).forEach((branch) => {
-          const polyline = make("polyline", {
-            points: (branch.points ?? [])
-              .map((point) => `${point[0]},${point[1]}`)
-              .join(" "),
+          const branchGroup = make("g");
+          const points = (branch.points ?? [])
+            .map((point) => `${point[0]},${point[1]}`)
+            .join(" ");
+          (branch.strokes ?? []).forEach((strokeLayer) => {
+            const polyline = make("polyline", {
+              points,
+              fill: "none",
+              stroke: strokeLayer.color ?? "#ff3b30",
+              "stroke-width": strokeLayer.width ?? 2.2,
+              "stroke-dasharray": strokeLayer.dasharray ?? "",
+              "stroke-opacity": strokeLayer.opacity ?? 1,
+              "stroke-linecap": "round",
+              "stroke-linejoin": "round",
+              "vector-effect": "non-scaling-stroke",
+            });
+            polyline.style.pointerEvents = "none";
+            branchGroup.appendChild(polyline);
+          });
+
+          const hitArea = make("polyline", {
+            points,
             fill: "none",
-            stroke: branch.stroke ?? "#ff3b30",
-            "stroke-width": branch.strokeWidth ?? 2.2,
+            stroke: "rgba(0, 0, 0, 0)",
+            "stroke-width": 12,
             "stroke-linecap": "round",
             "stroke-linejoin": "round",
             "vector-effect": "non-scaling-stroke",
           });
-          polyline.style.cursor = branch.locked ? "default" : "pointer";
+          hitArea.style.cursor = branch.locked ? "default" : "pointer";
           if (!branch.locked) {
-            polyline.addEventListener("click", (event) => {
+            hitArea.addEventListener("click", (event) => {
               event.stopPropagation();
               toggleBranch(branch.branchId);
             });
           }
-          branchesGroup.appendChild(polyline);
+          branchGroup.appendChild(hitArea);
+          branchesGroup.appendChild(branchGroup);
 
           if (data.showLabels && branch.label) {
             const text = make("text", {
@@ -153,34 +172,115 @@ def build_viewer_branches(
     branches_df: pd.DataFrame,
     paths_payload: list[dict],
     review_state: dict,
+    allow_reuse_assigned: bool,
+    provisional_synthetic_links: list[dict[str, object]] | None = None,
 ) -> list[dict]:
-    branch_color_lookup = {
-        branch_id: DEFAULT_BRANCH_COLOR for branch_id in branches_df["branch_id"].astype(int).tolist()
+    branch_memberships: dict[int, list[str]] = {
+        int(branch_id): [] for branch_id in branches_df["branch_id"].astype(int).tolist()
     }
     assigned_branch_ids: set[int] = set()
     for vessel in review_state["vessels"].values():
         color = ARTERE_COLOR if vessel["category"] == "artere" else VEINE_COLOR
         for branch_id in vessel["branch_ids"]:
-            branch_color_lookup[int(branch_id)] = color
-            assigned_branch_ids.add(int(branch_id))
+            branch_id = int(branch_id)
+            branch_memberships.setdefault(branch_id, []).append(color)
+            assigned_branch_ids.add(branch_id)
 
     selected_branch_set = set(int(branch_id) for branch_id in review_state["selected_branch_ids"])
     path_map = {item["branchId"]: item for item in paths_payload}
     viewer_branches: list[dict] = []
-    for branch_id, color in branch_color_lookup.items():
+    for branch_id, memberships in branch_memberships.items():
         path = path_map.get(branch_id)
         if path is None:
             continue
         is_selected = branch_id in selected_branch_set
+        strokes: list[dict[str, float | str]] = []
+        if memberships:
+            unique_memberships = list(dict.fromkeys(memberships))
+            base_width = 5.6 if len(unique_memberships) > 1 else 3.0
+            width_step = 1.4 if len(unique_memberships) > 1 else 0.0
+            for index, color in enumerate(unique_memberships):
+                strokes.append(
+                    {
+                        "color": color,
+                        "width": max(2.4, base_width - index * width_step),
+                    }
+                )
+        else:
+            strokes.append(
+                {
+                    "color": DEFAULT_BRANCH_COLOR,
+                    "width": 2.4,
+                }
+            )
+
+        if is_selected:
+            strokes.append(
+                {
+                    "color": SELECTED_COLOR,
+                    "width": 2.8,
+                }
+            )
+
         viewer_branches.append(
             {
                 "branchId": branch_id,
                 "points": path["points"],
                 "label": path["label"],
-                "stroke": SELECTED_COLOR if is_selected else color,
-                "strokeWidth": 4.8 if is_selected else 2.4,
                 "labelColor": SELECTED_COLOR if is_selected else "#ffffff",
-                "locked": (branch_id in assigned_branch_ids) and not is_selected,
+                "locked": (branch_id in assigned_branch_ids) and not is_selected and not allow_reuse_assigned,
+                "strokes": strokes,
             }
         )
+
+    synthetic_index = 0
+    for vessel in review_state["vessels"].values():
+        color = ARTERE_COLOR if vessel["category"] == "artere" else VEINE_COLOR
+        for synthetic_link in vessel.get("synthetic_links", []):
+            viewer_branches.append(
+                {
+                    "branchId": f"saved-synthetic-{synthetic_index}",
+                    "points": synthetic_link["points"],
+                    "label": None,
+                    "labelColor": "#ffffff",
+                    "locked": True,
+                    "strokes": [
+                        {
+                            "color": color,
+                            "width": 5.2,
+                            "opacity": 0.45,
+                        },
+                        {
+                            "color": color,
+                            "width": 2.6,
+                            "opacity": 1,
+                        },
+                    ],
+                }
+            )
+            synthetic_index += 1
+
+    for synthetic_link in provisional_synthetic_links or []:
+        viewer_branches.append(
+            {
+                "branchId": f"provisional-synthetic-{synthetic_index}",
+                "points": synthetic_link["points"],
+                "label": None,
+                "labelColor": "#ffffff",
+                "locked": True,
+                "strokes": [
+                    {
+                        "color": SELECTED_COLOR,
+                        "width": 5.6,
+                        "opacity": 0.45,
+                    },
+                    {
+                        "color": SELECTED_COLOR,
+                        "width": 2.8,
+                        "opacity": 1,
+                    }
+                ],
+            }
+        )
+        synthetic_index += 1
     return viewer_branches

@@ -16,8 +16,15 @@ def get_or_create_review_state(run_dir: Path) -> dict:
         saved_path = run_dir / "manual_review_state.json"
         state = read_json(saved_path) if saved_path.exists() else {}
         st.session_state[state_key] = {
-            "selected_branch_ids": state.get("selected_branch_ids", []),
-            "vessels": state.get("vessels", {}),
+            "selected_branch_ids": [],
+            "vessels": {
+                vessel_name: {
+                    "category": vessel.get("category", "artere"),
+                    "branch_ids": vessel.get("branch_ids", []),
+                    "synthetic_links": vessel.get("synthetic_links", []),
+                }
+                for vessel_name, vessel in state.get("vessels", {}).items()
+            },
         }
     return st.session_state[state_key]
 
@@ -31,20 +38,18 @@ def next_default_vessel_name(vessels: dict[str, dict], category: str) -> str:
     return f"{prefix}_{index}"
 
 
-def score_vessel(branches_df: pd.DataFrame, branch_ids: list[int]) -> dict[str, object]:
-    selected = branches_df[branches_df["branch_id"].isin(branch_ids)].copy()
-    if selected.empty:
-        return {
-            "branch_count": 0,
-            "component_count": 0,
-            "length": np.nan,
-            "chord": np.nan,
-            "tortuosity": np.nan,
-        }
+def _build_graph(
+    branches_df: pd.DataFrame,
+    branch_ids: list[int] | None = None,
+) -> tuple[dict[int, list[tuple[int, float, int]]], dict[int, tuple[float, float]]]:
+    if branch_ids is None:
+        graph_df = branches_df
+    else:
+        graph_df = branches_df[branches_df["branch_id"].isin(branch_ids)].copy()
 
     adjacency: dict[int, list[tuple[int, float, int]]] = {}
     node_positions: dict[int, tuple[float, float]] = {}
-    for _, row in selected.iterrows():
+    for _, row in graph_df.iterrows():
         src = int(row["node-id-src"])
         dst = int(row["node-id-dst"])
         length = float(row["branch-distance"])
@@ -59,7 +64,10 @@ def score_vessel(branches_df: pd.DataFrame, branch_ids: list[int]) -> dict[str, 
             float(row["image-coord-dst-1"]),
             float(row["image-coord-dst-0"]),
         )
+    return adjacency, node_positions
 
+
+def _connected_components(adjacency: dict[int, list[tuple[int, float, int]]]) -> list[set[int]]:
     unvisited = set(adjacency)
     components: list[set[int]] = []
     while unvisited:
@@ -75,7 +83,174 @@ def score_vessel(branches_df: pd.DataFrame, branch_ids: list[int]) -> dict[str, 
                         unvisited.remove(neighbor)
                     queue.append(neighbor)
         components.append(component)
+    return components
 
+
+def resolve_vessel_branch_ids(
+    branches_df: pd.DataFrame,
+    branch_ids: list[int],
+) -> dict[str, object]:
+    resolved_branch_ids = sorted({int(branch_id) for branch_id in branch_ids})
+    return {
+        "branch_ids": resolved_branch_ids,
+        "bridge_branch_count": 0,
+        "resolved_component_count": 0,
+        "bridge_success": True,
+        "synthetic_links": [],
+    }
+
+
+def _candidate_nodes_for_component(
+    component: set[int],
+    adjacency: dict[int, list[tuple[int, float, int]]],
+) -> list[int]:
+    endpoints = [node_id for node_id in component if len(adjacency[node_id]) <= 1]
+    return endpoints if endpoints else list(component)
+
+
+def synthesize_missing_links(
+    branches_df: pd.DataFrame,
+    branch_ids: list[int],
+) -> dict[str, object]:
+    selected_branch_ids = sorted({int(branch_id) for branch_id in branch_ids})
+    if not selected_branch_ids:
+        return {
+            "branch_ids": [],
+            "synthetic_links": [],
+            "component_count": 0,
+            "resolved_component_count": 0,
+            "bridge_success": True,
+        }
+
+    adjacency, node_positions = _build_graph(branches_df, selected_branch_ids)
+    if not adjacency:
+        return {
+            "branch_ids": selected_branch_ids,
+            "synthetic_links": [],
+            "component_count": 0,
+            "resolved_component_count": 0,
+            "bridge_success": True,
+        }
+
+    components = _connected_components(adjacency)
+    if len(components) <= 1:
+        return {
+            "branch_ids": selected_branch_ids,
+            "synthetic_links": [],
+            "component_count": 1,
+            "resolved_component_count": 1,
+            "bridge_success": True,
+        }
+
+    working_components = [set(component) for component in components]
+    synthetic_links: list[dict[str, object]] = []
+
+    while len(working_components) > 1:
+        best_pair: tuple[int, int] | None = None
+        best_nodes: tuple[int, int] | None = None
+        best_distance: float | None = None
+
+        for idx, component_a in enumerate(working_components):
+            candidates_a = _candidate_nodes_for_component(component_a, adjacency)
+            for jdx, component_b in enumerate(working_components[idx + 1 :], start=idx + 1):
+                candidates_b = _candidate_nodes_for_component(component_b, adjacency)
+                for node_a in candidates_a:
+                    ax, ay = node_positions[node_a]
+                    for node_b in candidates_b:
+                        bx, by = node_positions[node_b]
+                        distance = float(np.hypot(ax - bx, ay - by))
+                        if best_distance is None or distance < best_distance:
+                            best_distance = distance
+                            best_pair = (idx, jdx)
+                            best_nodes = (node_a, node_b)
+
+        if best_pair is None or best_nodes is None or best_distance is None:
+            return {
+                "branch_ids": selected_branch_ids,
+                "synthetic_links": synthetic_links,
+                "component_count": len(components),
+                "resolved_component_count": len(working_components),
+                "bridge_success": False,
+            }
+
+        src_node_id, dst_node_id = best_nodes
+        src_x, src_y = node_positions[src_node_id]
+        dst_x, dst_y = node_positions[dst_node_id]
+        synthetic_links.append(
+            {
+                "src_node_id": int(src_node_id),
+                "dst_node_id": int(dst_node_id),
+                "points": [
+                    [float(src_x), float(src_y)],
+                    [float(dst_x), float(dst_y)],
+                ],
+                "length": float(best_distance),
+            }
+        )
+        adjacency.setdefault(src_node_id, []).append((dst_node_id, float(best_distance), -1))
+        adjacency.setdefault(dst_node_id, []).append((src_node_id, float(best_distance), -1))
+
+        idx, jdx = best_pair
+        merged = working_components[idx] | working_components[jdx]
+        working_components[idx] = merged
+        del working_components[jdx]
+
+    return {
+        "branch_ids": selected_branch_ids,
+        "synthetic_links": synthetic_links,
+        "component_count": len(components),
+        "resolved_component_count": 1,
+        "bridge_success": True,
+    }
+
+
+def score_vessel(
+    branches_df: pd.DataFrame,
+    branch_ids: list[int],
+    synthetic_links: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    selected = branches_df[branches_df["branch_id"].isin(branch_ids)].copy()
+    if selected.empty:
+        return {
+            "branch_count": 0,
+            "component_count": 0,
+            "bridge_branch_count": 0,
+            "resolved_component_count": 0,
+            "bridge_success": True,
+            "length": np.nan,
+            "chord": np.nan,
+            "tortuosity": np.nan,
+        }
+
+    initial_adjacency, _ = _build_graph(branches_df, branch_ids)
+    initial_components = _connected_components(initial_adjacency)
+    if synthetic_links is None:
+        resolution = synthesize_missing_links(branches_df, branch_ids)
+        synthetic_links = resolution["synthetic_links"]
+    else:
+        synthetic_links = list(synthetic_links)
+        resolution = {
+            "branch_ids": sorted({int(branch_id) for branch_id in branch_ids}),
+            "synthetic_links": synthetic_links,
+            "component_count": len(initial_components),
+            "resolved_component_count": 1 if initial_components else 0,
+            "bridge_success": True,
+        }
+
+    adjacency, node_positions = _build_graph(branches_df, resolution["branch_ids"])
+    for link_index, link in enumerate(synthetic_links):
+        src_node_id = int(link["src_node_id"])
+        dst_node_id = int(link["dst_node_id"])
+        length = float(link["length"])
+        synthetic_edge_id = -(link_index + 1)
+        adjacency.setdefault(src_node_id, []).append((dst_node_id, length, synthetic_edge_id))
+        adjacency.setdefault(dst_node_id, []).append((src_node_id, length, synthetic_edge_id))
+        src_x, src_y = link["points"][0]
+        dst_x, dst_y = link["points"][1]
+        node_positions[src_node_id] = (float(src_x), float(src_y))
+        node_positions[dst_node_id] = (float(dst_x), float(dst_y))
+
+    components = _connected_components(adjacency)
     component_branch_lengths: list[tuple[set[int], float]] = []
     for component in components:
         branch_ids_in_component: set[int] = set()
@@ -130,7 +305,10 @@ def score_vessel(branches_df: pd.DataFrame, branch_ids: list[int]) -> dict[str, 
 
     return {
         "branch_count": int(len(selected)),
-        "component_count": int(len(components)),
+        "component_count": int(len(initial_components)),
+        "bridge_branch_count": int(len(synthetic_links)),
+        "resolved_component_count": int(resolution["resolved_component_count"]),
+        "bridge_success": bool(resolution["bridge_success"]),
         "length": path_length,
         "chord": chord,
         "tortuosity": (path_length / chord) if chord > 0 else np.nan,
@@ -139,14 +317,22 @@ def score_vessel(branches_df: pd.DataFrame, branch_ids: list[int]) -> dict[str, 
 
 def persist_manual_review(run_dir: Path, state: dict, branches_df: pd.DataFrame) -> None:
     state_path = run_dir / "manual_review_state.json"
+    persisted_state = {
+        "selected_branch_ids": [],
+        "vessels": state["vessels"],
+    }
     state_path.write_text(
-        json.dumps(state, ensure_ascii=True, indent=2),
+        json.dumps(persisted_state, ensure_ascii=True, indent=2),
         encoding="utf-8",
     )
 
     rows: list[dict[str, object]] = []
     for vessel_name, vessel in state["vessels"].items():
-        metrics = score_vessel(branches_df, vessel["branch_ids"])
+        metrics = score_vessel(
+            branches_df,
+            vessel["branch_ids"],
+            vessel.get("synthetic_links", []),
+        )
         rows.append(
             {
                 "vessel_name": vessel_name,
@@ -154,6 +340,9 @@ def persist_manual_review(run_dir: Path, state: dict, branches_df: pd.DataFrame)
                 "branch_ids": json.dumps(vessel["branch_ids"]),
                 "branch_count": metrics["branch_count"],
                 "component_count": metrics["component_count"],
+                "bridge_branch_count": metrics["bridge_branch_count"],
+                "resolved_component_count": metrics["resolved_component_count"],
+                "bridge_success": metrics["bridge_success"],
                 "path_length": metrics["length"],
                 "chord_length": metrics["chord"],
                 "tortuosity": metrics["tortuosity"],
@@ -169,6 +358,9 @@ def persist_manual_review(run_dir: Path, state: dict, branches_df: pd.DataFrame)
             "branch_ids",
             "branch_count",
             "component_count",
+            "bridge_branch_count",
+            "resolved_component_count",
+            "bridge_success",
             "path_length",
             "chord_length",
             "tortuosity",
@@ -205,13 +397,19 @@ def build_selection_table(branches_df: pd.DataFrame, selected_branch_ids: list[i
 def build_vessel_scores_table(review_state: dict, branches_df: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for vessel_name, vessel in sorted(review_state["vessels"].items()):
-        metrics = score_vessel(branches_df, vessel["branch_ids"])
+        metrics = score_vessel(
+            branches_df,
+            vessel["branch_ids"],
+            vessel.get("synthetic_links", []),
+        )
         rows.append(
             {
                 "Vessel": vessel_name,
                 "Category": vessel["category"],
                 "Branches": len(vessel["branch_ids"]),
                 "Components": metrics["component_count"],
+                "Auto bridges": metrics["bridge_branch_count"],
+                "Bridge status": "connected" if metrics["bridge_success"] else "partial",
                 "Path length": metrics["length"],
                 "Chord": metrics["chord"],
                 "Tortuosity": metrics["tortuosity"],
