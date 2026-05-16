@@ -1,7 +1,0 @@
-.DS_Store
-data*
-checkpoints
-*.pyc
-output_images
-*.pkl
-external_models/

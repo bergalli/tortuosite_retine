@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: tortuosite-retine
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.14
+Description-Content-Type: text/markdown
+Requires-Dist: huggingface-hub>=1.15.0
+Requires-Dist: opencv-python>=4.13.0.92
+Requires-Dist: pandas>=3.0.3
+Requires-Dist: pillow>=12.2.0
+Requires-Dist: scikit-image>=0.26.0
+Requires-Dist: skan>=0.13.1
+Requires-Dist: streamlit>=1.45.1
+Requires-Dist: timm>=1.0.27
+Requires-Dist: torch>=2.12.0
+Requires-Dist: torchvision>=0.27.0
+
+python main.py --image "demo/test 2.png" 
+python main.py --image "demo/test.png" 
