@@ -47,6 +47,7 @@ def _handle_run_creation(sidebar_values: dict) -> None:
         vessel_low_percentile=sidebar_values["vessel_low_percentile"],
         deep_threshold=sidebar_values["deep_threshold"],
         deep_modality=sidebar_values["deep_modality"],
+        deep_backend=sidebar_values["deep_backend"],
     )
     st.session_state["active_run_id"] = run_id
     st.rerun()

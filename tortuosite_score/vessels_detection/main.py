@@ -29,6 +29,7 @@ from tortuosite_score.vessels_detection.analyse import (
     select_first_significant_branches,
 )
 from tortuosite_score.vessels_detection.deep_model import predict_vessels_deep
+from tortuosite_score.vessels_detection.vascx_model import predict_vascx
 
 
 def save_intermediate_image(
@@ -92,6 +93,130 @@ def create_skeleton_overlay(image: np.ndarray, skeleton: np.ndarray) -> np.ndarr
     return overlay
 
 
+def create_vascx_av_overlay(image: np.ndarray, artery_vein_classes: np.ndarray) -> np.ndarray:
+    if image.dtype != np.uint8:
+        base = normalize_to_uint8(image)
+    else:
+        base = image.copy()
+
+    color_mask = np.zeros_like(base)
+    color_mask[artery_vein_classes == 1] = np.array([255, 0, 0], dtype=np.uint8)
+    color_mask[artery_vein_classes == 2] = np.array([0, 80, 255], dtype=np.uint8)
+    color_mask[artery_vein_classes == 3] = np.array([0, 255, 0], dtype=np.uint8)
+    mask = artery_vein_classes > 0
+    overlay = base.copy()
+    overlay[mask] = (0.45 * base[mask] + 0.55 * color_mask[mask]).astype(np.uint8)
+    return overlay
+
+
+def create_disc_overlay(image: np.ndarray, disc_mask: np.ndarray) -> np.ndarray:
+    if image.dtype != np.uint8:
+        base = normalize_to_uint8(image)
+    else:
+        base = image.copy()
+
+    overlay = base.copy()
+    overlay[disc_mask] = (0.45 * base[disc_mask] + 0.55 * np.array([255, 255, 0])).astype(
+        np.uint8
+    )
+    return overlay
+
+
+def create_optic_disc_root_overlay(
+    image: np.ndarray,
+    skeleton: np.ndarray,
+    disc_mask: np.ndarray,
+) -> np.ndarray:
+    overlay = create_skeleton_overlay(create_disc_overlay(image, disc_mask), skeleton)
+    if not np.any(disc_mask):
+        return overlay
+
+    rows, cols = np.where(disc_mask)
+    y_min, y_max = int(rows.min()), int(rows.max())
+    x_min, x_max = int(cols.min()), int(cols.max())
+    radius = int(max(y_max - y_min + 1, x_max - x_min + 1) * 1.6)
+    center_y = (y_min + y_max) // 2
+    center_x = (x_min + x_max) // 2
+
+    y0 = max(0, center_y - radius)
+    y1 = min(overlay.shape[0], center_y + radius)
+    x0 = max(0, center_x - radius)
+    x1 = min(overlay.shape[1], center_x + radius)
+    return overlay[y0:y1, x0:x1]
+
+
+def estimate_optic_disc_mask(
+    image: np.ndarray,
+    vessel_mask: np.ndarray,
+    fundus_mask: np.ndarray,
+) -> np.ndarray:
+    """
+    Fallback for UWF images where the VascX disc model returns no disc.
+
+    This is used only for debug crops/overlays. It does not alter vessel
+    segmentation or tortuosity scoring.
+    """
+    if image.dtype != np.uint8:
+        image_uint8 = normalize_to_uint8(image)
+    else:
+        image_uint8 = image
+
+    red = image_uint8[:, :, 0].astype(np.float32)
+    green = image_uint8[:, :, 1].astype(np.float32)
+    blue = image_uint8[:, :, 2].astype(np.float32)
+    brightness = 0.45 * red + 0.45 * green - 0.10 * blue
+
+    if not np.any(fundus_mask):
+        return np.zeros(fundus_mask.shape, dtype=bool)
+
+    threshold = np.percentile(brightness[fundus_mask], 99.2)
+    bright = (brightness >= threshold) & fundus_mask
+    bright = cv2.morphologyEx(
+        bright.astype(np.uint8),
+        cv2.MORPH_CLOSE,
+        np.ones((9, 9), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+
+    component_count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        bright.astype(np.uint8),
+        connectivity=8,
+    )
+    if component_count <= 1:
+        return np.zeros(fundus_mask.shape, dtype=bool)
+
+    vessel_density = cv2.GaussianBlur(
+        vessel_mask.astype(np.float32),
+        (0, 0),
+        sigmaX=28,
+        sigmaY=28,
+    )
+    best_label = 0
+    best_score = -1.0
+    for label in range(1, component_count):
+        area = float(stats[label, cv2.CC_STAT_AREA])
+        if area < 20:
+            continue
+        cx, cy = centroids[label]
+        y = int(np.clip(round(cy), 0, vessel_density.shape[0] - 1))
+        x = int(np.clip(round(cx), 0, vessel_density.shape[1] - 1))
+        score = float(vessel_density[y, x]) * np.sqrt(area)
+        if score > best_score:
+            best_label = label
+            best_score = score
+
+    if best_label == 0:
+        return np.zeros(fundus_mask.shape, dtype=bool)
+
+    disc = labels == best_label
+    disc = cv2.dilate(
+        disc.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (35, 35)),
+        iterations=1,
+    ).astype(bool)
+    return disc & fundus_mask
+
+
 def run_pipeline(
     image_path: str,
     output_csv: str,
@@ -102,6 +227,7 @@ def run_pipeline(
     vessel_low_percentile: float | None = 90.0,
     deep_threshold: float = 0.30,
     deep_modality: str = "CFP",
+    deep_backend: str = "DCP",
 ):
     image_path = Path(image_path)
     output_csv = Path(output_csv)
@@ -126,28 +252,82 @@ def run_pipeline(
     save_intermediate_image(preprocessed, intermediate_dir / "03_preprocessed.png")
 
     # 4. Segmentation des vaisseaux
+    artery_binary = None
+    vein_binary = None
+    disc_mask = None
     if method == "deep":
-        print("Méthode utilisée : deep learning DCP")
-        print(f"Modalité DCP : {deep_modality}")
+        normalized_backend = deep_backend.strip().upper()
+        if normalized_backend == "DCP":
+            print("Méthode utilisée : deep learning DCP")
+            print(f"Modalité DCP : {deep_modality}")
 
-        vessel_prob = predict_vessels_deep(
-            image,
-            mask=fundus_mask,
-            modality=deep_modality,
-        )
+            vessel_prob = predict_vessels_deep(
+                image,
+                mask=fundus_mask,
+                modality=deep_modality,
+            )
 
-        save_intermediate_image(
-            vessel_prob,
-            intermediate_dir / "04_deep_vessel_probability.png",
-        )
+            save_intermediate_image(
+                vessel_prob,
+                intermediate_dir / "04_deep_vessel_probability.png",
+            )
 
-        binary = vessel_prob > deep_threshold
-        binary &= fundus_mask
+            binary = vessel_prob > deep_threshold
+            binary &= fundus_mask
 
-        save_intermediate_image(
-            binary,
-            intermediate_dir / "05_binary_mask.png",
-        )
+            save_intermediate_image(
+                binary,
+                intermediate_dir / "05_binary_mask.png",
+            )
+        elif normalized_backend == "VASCX":
+            print("Méthode utilisée : deep learning VascX")
+            vascx_prediction = predict_vascx(image, mask=fundus_mask)
+
+            binary = vascx_prediction.vessel_mask
+            artery_binary = vascx_prediction.artery_mask
+            vein_binary = vascx_prediction.vein_mask
+            disc_mask = vascx_prediction.disc_mask
+
+            save_intermediate_image(
+                vascx_prediction.vessel_mask,
+                intermediate_dir / "04_vascx_vessel_mask.png",
+            )
+            save_intermediate_image(
+                create_vascx_av_overlay(image, vascx_prediction.artery_vein_classes),
+                intermediate_dir / "04b_vascx_artery_vein_overlay.png",
+            )
+            save_intermediate_image(
+                vascx_prediction.disc_mask,
+                intermediate_dir / "04c_vascx_disc_mask.png",
+            )
+            save_intermediate_image(
+                create_disc_overlay(image, vascx_prediction.disc_mask),
+                intermediate_dir / "04d_vascx_disc_overlay.png",
+            )
+            if not np.any(disc_mask):
+                disc_mask = estimate_optic_disc_mask(
+                    image,
+                    vessel_mask=vascx_prediction.vessel_mask,
+                    fundus_mask=fundus_mask,
+                )
+                if np.any(disc_mask):
+                    print("[VascX] disc model returned empty mask; using debug-only disc estimate.")
+                    save_intermediate_image(
+                        disc_mask,
+                        intermediate_dir / "04e_estimated_disc_mask.png",
+                    )
+                    save_intermediate_image(
+                        create_disc_overlay(image, disc_mask),
+                        intermediate_dir / "04f_estimated_disc_overlay.png",
+                    )
+            save_intermediate_image(
+                binary,
+                intermediate_dir / "05_binary_mask.png",
+            )
+        else:
+            raise ValueError(
+                f"Deep backend inconnu : {deep_backend}. Utilise 'DCP' ou 'VascX'."
+            )
 
     elif method == "classical":
         print("Méthode utilisée : classique Frangi")
@@ -181,17 +361,33 @@ def run_pipeline(
 
 
     # 5. Nettoyage
-    cleaned_binary = clean_binary_mask(
-        binary,
-        mask=fundus_mask,
-    )
+    if artery_binary is not None and vein_binary is not None:
+        cleaned_artery = clean_binary_mask(artery_binary, mask=fundus_mask)
+        cleaned_vein = clean_binary_mask(vein_binary, mask=fundus_mask)
+        save_intermediate_image(
+            cleaned_artery,
+            intermediate_dir / "06_cleaned_artery_mask.png",
+        )
+        save_intermediate_image(
+            cleaned_vein,
+            intermediate_dir / "06_cleaned_vein_mask.png",
+        )
+        cleaned_binary = cleaned_artery | cleaned_vein
+    else:
+        cleaned_binary = clean_binary_mask(
+            binary,
+            mask=fundus_mask,
+        )
     save_intermediate_image(
         cleaned_binary,
         intermediate_dir / "06_cleaned_mask.png",
     )
 
     # 6. Skeletonisation
-    skeleton = skeletonize_mask(cleaned_binary)
+    if artery_binary is not None and vein_binary is not None:
+        skeleton = skeletonize_mask(cleaned_artery) | skeletonize_mask(cleaned_vein)
+    else:
+        skeleton = skeletonize_mask(cleaned_binary)
 
     save_intermediate_image(
         skeleton,
@@ -203,6 +399,11 @@ def run_pipeline(
         create_skeleton_overlay(image, skeleton),
         intermediate_dir / "07b_skeleton_overlay.png",
     )
+    if disc_mask is not None:
+        save_intermediate_image(
+            create_optic_disc_root_overlay(image, skeleton, disc_mask),
+            intermediate_dir / "07c_optic_disc_root_overlay.png",
+        )
 
     # 7. Analyse squelette + tortuosité
     summary = analyze_skeleton_tortuosity(skeleton)
@@ -283,6 +484,12 @@ def parse_args():
         default="CFP",
         help="Modalité pour le modèle DCP : CFP ou UWF principalement.",
     )
+    parser.add_argument(
+        "--deep-backend",
+        choices=["DCP", "VascX"],
+        default="DCP",
+        help="Backend deep learning : DCP historique ou VascX.",
+    )
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -297,4 +504,5 @@ if __name__ == "__main__":
         vessel_low_percentile=args.vessel_low_percentile,
         deep_threshold=args.deep_threshold,
         deep_modality=args.deep_modality,
+        deep_backend=args.deep_backend,
     )

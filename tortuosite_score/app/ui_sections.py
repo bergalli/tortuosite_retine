@@ -24,6 +24,12 @@ def render_sidebar_run_setup() -> dict:
         )
 
         if method == "deep":
+            deep_backend = st.selectbox(
+                "Deep backend",
+                options=["VascX", "DCP"],
+                index=0,
+                help="VascX adds artery/vein and optic-disc segmentation; DCP is the original fallback.",
+            )
             deep_threshold = st.slider(
                 "Deep threshold",
                 0.0,
@@ -31,11 +37,13 @@ def render_sidebar_run_setup() -> dict:
                 0.30,
                 0.01,
                 help="Probability cutoff applied to the neural segmentation.",
+                disabled=deep_backend == "VascX",
             )
             deep_modality = st.selectbox(
                 "Deep modality",
                 options=["CFP", "UWF", "FFA", "SLO", "OCTA"],
                 index=0,
+                disabled=deep_backend == "VascX",
             )
             vessel_percentile = 95.0
             vessel_low_percentile = 90.0
@@ -44,6 +52,7 @@ def render_sidebar_run_setup() -> dict:
             vessel_low_percentile = st.slider("Vessel low percentile", 0.0, 99.0, 90.0, 0.1)
             deep_threshold = 0.30
             deep_modality = "CFP"
+            deep_backend = "DCP"
 
         run_btn = st.button(
             "Run segmentation",
@@ -59,6 +68,7 @@ def render_sidebar_run_setup() -> dict:
         "vessel_low_percentile": vessel_low_percentile,
         "deep_threshold": deep_threshold,
         "deep_modality": deep_modality,
+        "deep_backend": deep_backend,
         "run_btn": run_btn,
     }
 

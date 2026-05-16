@@ -14,6 +14,8 @@ Requires-Dist: streamlit>=1.45.1
 Requires-Dist: timm>=1.0.27
 Requires-Dist: torch>=2.12.0
 Requires-Dist: torchvision>=0.27.0
+Requires-Dist: vascx-simplify>=0.1.11
 
-python main.py --image "demo/test 2.png" 
-python main.py --image "demo/test.png" 
+# Run with 
+
+uv run streamlit run tortuosite_score/app/app.py

@@ -67,7 +67,18 @@ def load_review_bundle(run_dir_str: str) -> dict:
     if cleaned_mask is None:
         raise FileNotFoundError(f"Missing cleaned mask for run {run_dir.name}")
 
-    skeleton = skeletonize_mask(cleaned_mask > 0)
+    cleaned_artery = cv2.imread(
+        str(output_dir / "06_cleaned_artery_mask.png"),
+        cv2.IMREAD_GRAYSCALE,
+    )
+    cleaned_vein = cv2.imread(
+        str(output_dir / "06_cleaned_vein_mask.png"),
+        cv2.IMREAD_GRAYSCALE,
+    )
+    if cleaned_artery is not None and cleaned_vein is not None:
+        skeleton = skeletonize_mask(cleaned_artery > 0) | skeletonize_mask(cleaned_vein > 0)
+    else:
+        skeleton = skeletonize_mask(cleaned_mask > 0)
     skeleton_graph = Skeleton(skeleton)
 
     summary_path = output_dir / "08_full_skeleton_summary.csv"
@@ -115,6 +126,7 @@ def run_uploaded_analysis(
     vessel_low_percentile: float,
     deep_threshold: float,
     deep_modality: str,
+    deep_backend: str,
 ) -> str:
     run_id = slugify_name(uploaded_file.name)
     run_dir = RUNS_ROOT / run_id
@@ -152,6 +164,7 @@ def run_uploaded_analysis(
                 vessel_low_percentile=float(vessel_low_percentile),
                 deep_threshold=float(deep_threshold),
                 deep_modality=deep_modality,
+                deep_backend=deep_backend,
             )
 
     metadata = {
@@ -162,6 +175,7 @@ def run_uploaded_analysis(
         "vessel_low_percentile": float(vessel_low_percentile),
         "deep_threshold": float(deep_threshold),
         "deep_modality": deep_modality,
+        "deep_backend": deep_backend,
     }
     (run_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=True, indent=2),
