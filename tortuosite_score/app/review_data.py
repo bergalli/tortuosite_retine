@@ -3,8 +3,8 @@ from __future__ import annotations
 import base64
 import io
 import json
+import shutil
 from contextlib import redirect_stdout
-from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -27,6 +27,7 @@ def slugify_name(filename: str) -> str:
 def list_runs() -> list[Path]:
     return sorted(
         (path for path in RUNS_ROOT.iterdir() if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
 
@@ -115,8 +116,7 @@ def run_uploaded_analysis(
     deep_threshold: float,
     deep_modality: str,
 ) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_id = f"{timestamp}_{slugify_name(uploaded_file.name)}"
+    run_id = slugify_name(uploaded_file.name)
     run_dir = RUNS_ROOT / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -125,6 +125,19 @@ def run_uploaded_analysis(
 
     output_csv = run_dir / "results.csv"
     output_dir = run_dir / "output"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+
+    for stale_file in [
+        run_dir / "results.csv",
+        run_dir / "metadata.json",
+        run_dir / "logs.txt",
+        run_dir / "manual_review_state.json",
+        run_dir / "manual_vessels.csv",
+    ]:
+        if stale_file.exists():
+            stale_file.unlink()
+
     log_buffer = io.StringIO()
 
     with st.spinner("Running segmentation and skeleton extraction..."):
@@ -143,7 +156,6 @@ def run_uploaded_analysis(
 
     metadata = {
         "run_id": run_id,
-        "timestamp": timestamp,
         "image_name": uploaded_file.name,
         "method": method,
         "vessel_percentile": float(vessel_percentile),
@@ -156,4 +168,5 @@ def run_uploaded_analysis(
         encoding="utf-8",
     )
     (run_dir / "logs.txt").write_text(log_buffer.getvalue(), encoding="utf-8")
+    load_review_bundle.clear()
     return run_id

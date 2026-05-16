@@ -148,17 +148,36 @@ BRANCH_VIEWER = st.components.v2.component(
               x: branch.label[0],
               y: branch.label[1],
               fill: branch.labelColor ?? "#ffffff",
-              "font-size": 18,
+              "font-size": 12,
               "font-weight": 700,
               "text-anchor": "middle",
               "paint-order": "stroke",
               stroke: "rgba(0, 0, 0, 0.7)",
-              "stroke-width": 3,
+              "stroke-width": 2,
             });
             text.textContent = String(branch.branchId);
             text.style.pointerEvents = "none";
             branchesGroup.appendChild(text);
           }
+        });
+      }
+
+      if (data.showVesselLabels) {
+        (data.vesselLabels ?? []).forEach((label) => {
+          const text = make("text", {
+            x: label.position[0],
+            y: label.position[1],
+            fill: label.color ?? "#ffffff",
+            "font-size": 16,
+            "font-weight": 800,
+            "text-anchor": "middle",
+            "paint-order": "stroke",
+            stroke: "rgba(0, 0, 0, 0.78)",
+            "stroke-width": 3,
+          });
+          text.textContent = String(label.text);
+          text.style.pointerEvents = "none";
+          svg.appendChild(text);
         });
       }
 
@@ -284,3 +303,35 @@ def build_viewer_branches(
         )
         synthetic_index += 1
     return viewer_branches
+
+
+def build_vessel_labels(
+    branches_df: pd.DataFrame,
+    paths_payload: list[dict],
+    review_state: dict,
+) -> list[dict]:
+    path_map = {item["branchId"]: item for item in paths_payload}
+    vessel_labels: list[dict] = []
+    for vessel_name, vessel in sorted(review_state["vessels"].items()):
+        points: list[list[float]] = []
+        for branch_id in vessel.get("branch_ids", []):
+            path = path_map.get(int(branch_id))
+            if path is not None:
+                points.extend(path["points"])
+        for synthetic_link in vessel.get("synthetic_links", []):
+            points.extend(synthetic_link.get("points", []))
+
+        if not points:
+            continue
+
+        point_array = pd.DataFrame(points, columns=["x", "y"])
+        centroid_x = float(point_array["x"].mean())
+        centroid_y = float(point_array["y"].mean())
+        vessel_labels.append(
+            {
+                "text": vessel_name,
+                "position": [centroid_x, centroid_y],
+                "color": ARTERE_COLOR if vessel["category"] == "artere" else VEINE_COLOR,
+            }
+        )
+    return vessel_labels

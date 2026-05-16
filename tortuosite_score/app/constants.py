@@ -5,8 +5,8 @@ from pathlib import Path
 
 ARTERE_COLOR = "#ff453a"
 VEINE_COLOR = "#4c8dff"
-SELECTED_COLOR = "#ffd60a"
-DEFAULT_BRANCH_COLOR = "#ff7a70"
+SELECTED_COLOR = "#00c2a8"
+DEFAULT_BRANCH_COLOR = "#ffffff"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUNS_ROOT = PROJECT_ROOT / "demo" / "streamlit_runs"
