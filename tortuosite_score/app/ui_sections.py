@@ -73,19 +73,8 @@ def render_sidebar_run_setup() -> dict:
                     1,
                     help="Connect tiny gaps after artery/vein segmentation.",
                 )
-                vascx_auto_create_vessels = st.toggle(
-                    "Create VascX vessels",
-                    value=True,
-                    help="Initialize editable saved vessels from connected artery/vein skeleton groups.",
-                )
-                vascx_auto_min_vessel_length = st.slider(
-                    "Auto vessel min length",
-                    0.0,
-                    250.0,
-                    25.0,
-                    5.0,
-                    help="Ignore shorter auto-created vessel fragments.",
-                )
+                vascx_auto_create_vessels = False
+                vascx_auto_min_vessel_length = 25.0
             else:
                 vascx_av_size = 1024
                 vascx_use_contrast_enhancement = True

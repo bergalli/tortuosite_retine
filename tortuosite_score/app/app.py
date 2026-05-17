@@ -11,11 +11,10 @@ from tortuosite_score.app.review_data import (
     slugify_name,
 )
 from tortuosite_score.app.review_state import (
-    build_auto_vascx_vessels,
+    build_node_options,
     build_selection_table,
     build_vessel_scores_table,
     get_or_create_review_state,
-    has_branching_nodes,
     next_default_vessel_name,
     persist_manual_review,
     synthesize_missing_links,
@@ -23,6 +22,7 @@ from tortuosite_score.app.review_state import (
 from tortuosite_score.app.ui_sections import render_debug_tab, render_sidebar_run_setup
 from tortuosite_score.app.viewer_component import (
     BRANCH_VIEWER,
+    NODE_ENDPOINT_VIEWER,
     build_vessel_labels,
     build_viewer_branches,
 )
@@ -99,16 +99,48 @@ def _sync_viewer_selection(
     st.rerun()
 
 
+def _sync_endpoint_selection(
+    endpoint_result,
+    start_node_key: str,
+    end_node_key: str,
+    next_endpoint_target_key: str,
+) -> None:
+    changed = False
+    if getattr(endpoint_result, "start_node_id", None) is not None:
+        start_node_id = int(endpoint_result.start_node_id)
+        if st.session_state.get(start_node_key) != start_node_id:
+            st.session_state[start_node_key] = start_node_id
+            changed = True
+    if getattr(endpoint_result, "end_node_id", None) is not None:
+        end_node_id = int(endpoint_result.end_node_id)
+        if st.session_state.get(end_node_key) != end_node_id:
+            st.session_state[end_node_key] = end_node_id
+            changed = True
+    if getattr(endpoint_result, "next_endpoint_target", None) in {"start", "end"}:
+        next_target = endpoint_result.next_endpoint_target
+        if st.session_state.get(next_endpoint_target_key) != next_target:
+            st.session_state[next_endpoint_target_key] = next_target
+            changed = True
+    if changed:
+        st.rerun()
+
+
 def _clear_vessel_draft(
     review_state: dict,
     editing_vessel_name_key: str,
     editing_original_snapshot_key: str,
     vessel_name_reset_key: str,
     viewer_reset_key: str,
+    start_node_key: str,
+    end_node_key: str,
+    next_endpoint_target_key: str,
 ) -> None:
     review_state["selected_branch_ids"] = []
     st.session_state.pop(editing_vessel_name_key, None)
     st.session_state.pop(editing_original_snapshot_key, None)
+    st.session_state.pop(start_node_key, None)
+    st.session_state.pop(end_node_key, None)
+    st.session_state.pop(next_endpoint_target_key, None)
     st.session_state[vessel_name_reset_key] = True
     st.session_state[viewer_reset_key] += 1
 
@@ -120,6 +152,8 @@ def _start_vessel_edit(
     editing_original_snapshot_key: str,
     vessel_name_key: str,
     vessel_category_key: str,
+    start_node_key: str,
+    end_node_key: str,
 ) -> None:
     vessel = review_state["vessels"][vessel_name]
     branch_ids = sorted(int(branch_id) for branch_id in vessel["branch_ids"])
@@ -130,9 +164,15 @@ def _start_vessel_edit(
         "category": vessel["category"],
         "branch_ids": branch_ids,
         "synthetic_links": list(vessel.get("synthetic_links", [])),
+        "start_node_id": vessel.get("start_node_id"),
+        "end_node_id": vessel.get("end_node_id"),
     }
     st.session_state[vessel_name_key] = vessel_name
     st.session_state[vessel_category_key] = vessel["category"]
+    if vessel.get("start_node_id") is not None:
+        st.session_state[start_node_key] = int(vessel["start_node_id"])
+    if vessel.get("end_node_id") is not None:
+        st.session_state[end_node_key] = int(vessel["end_node_id"])
 
 
 def _resolve_clean_vessel_name(
@@ -147,12 +187,16 @@ def _build_vessel_payload(
     branches_df: pd.DataFrame,
     selected_branch_ids: list[int],
     vessel_category: str,
+    start_node_id: int | None,
+    end_node_id: int | None,
 ) -> tuple[dict, dict]:
     resolution = synthesize_missing_links(branches_df, selected_branch_ids)
     payload = {
         "category": vessel_category,
         "branch_ids": resolution["branch_ids"],
         "synthetic_links": resolution["synthetic_links"],
+        "start_node_id": start_node_id,
+        "end_node_id": end_node_id,
     }
     return payload, resolution
 
@@ -166,14 +210,6 @@ def _show_saved_vessel_status(vessel_name: str, resolution: dict) -> None:
         st.warning(f"Saved vessel `{vessel_name}` with unresolved disconnected pieces.")
     else:
         st.success(f"Saved vessel `{vessel_name}`.")
-
-
-def _stop_if_branching_selection(branches_df: pd.DataFrame, selected_branch_ids: list[int]) -> None:
-    if has_branching_nodes(branches_df, selected_branch_ids):
-        st.warning(
-            "This selection contains a bifurcation. Save one root-to-end vessel path at a time."
-        )
-        st.stop()
 
 
 def _branch_length_sum(branches_df: pd.DataFrame, branch_ids: list[int]) -> float:
@@ -221,7 +257,7 @@ def _render_manual_review(selected_run_name: str) -> None:
     review_state = get_or_create_review_state(
         selected_run_dir,
         branches_df=branches_df,
-        auto_create_vessels=bool(bundle["metadata"].get("vascx_auto_create_vessels", False)),
+        auto_create_vessels=False,
         auto_min_vessel_length=float(bundle["metadata"].get("vascx_auto_min_vessel_length", 25.0)),
     )
 
@@ -233,6 +269,9 @@ def _render_manual_review(selected_run_name: str) -> None:
     pending_edit_key = f"pending_vessel_edit::{selected_run_name}"
     editing_vessel_name_key = f"editing_vessel_name::{selected_run_name}"
     editing_original_snapshot_key = f"editing_original_snapshot::{selected_run_name}"
+    start_node_key = f"vessel_start_node::{selected_run_name}"
+    end_node_key = f"vessel_end_node::{selected_run_name}"
+    next_endpoint_target_key = f"next_endpoint_target::{selected_run_name}"
     if st.session_state.get(vessel_name_reset_key):
         st.session_state[vessel_name_key] = ""
         st.session_state[vessel_category_key] = "artere"
@@ -252,6 +291,8 @@ def _render_manual_review(selected_run_name: str) -> None:
             editing_original_snapshot_key,
             vessel_name_key,
             vessel_category_key,
+            start_node_key,
+            end_node_key,
         )
 
     editing_vessel_name = st.session_state.get(editing_vessel_name_key)
@@ -262,6 +303,9 @@ def _render_manual_review(selected_run_name: str) -> None:
             editing_original_snapshot_key,
             vessel_name_reset_key,
             viewer_reset_key,
+            start_node_key,
+            end_node_key,
+            next_endpoint_target_key,
         )
         editing_vessel_name = None
     is_editing_vessel = editing_vessel_name is not None
@@ -286,18 +330,19 @@ def _render_manual_review(selected_run_name: str) -> None:
         branches_df,
         sorted(int(branch_id) for branch_id in review_state["selected_branch_ids"]),
     )
+    viewer_branches = build_viewer_branches(
+        branches_df=branches_df,
+        paths_payload=bundle["paths_payload"],
+        review_state=review_state,
+        allow_reuse_assigned=allow_reuse_assigned,
+        provisional_synthetic_links=provisional_resolution["synthetic_links"],
+    )
     viewer_result = BRANCH_VIEWER(
         data={
             "imageUrl": bundle["image_url"],
             "imageWidth": bundle["image_width"],
             "imageHeight": bundle["image_height"],
-            "branches": build_viewer_branches(
-                branches_df=branches_df,
-                paths_payload=bundle["paths_payload"],
-                review_state=review_state,
-                allow_reuse_assigned=allow_reuse_assigned,
-                provisional_synthetic_links=provisional_resolution["synthetic_links"],
-            ),
+            "branches": viewer_branches,
             "selectedBranchIds": sorted(int(branch_id) for branch_id in review_state["selected_branch_ids"]),
             "selectionMode": "vessel" if selection_mode == "Whole vessels" else "branch",
             "showBaseImage": show_base_image,
@@ -328,6 +373,8 @@ def _render_manual_review(selected_run_name: str) -> None:
 
     selected_branch_ids = sorted(int(branch_id) for branch_id in review_state["selected_branch_ids"])
     selected_complete_vessels = _selected_complete_vessel_names(review_state, selected_branch_ids)
+    node_options = build_node_options(branches_df, selected_branch_ids)
+    node_ids = [int(option["node_id"]) for option in node_options]
     selection_df = build_selection_table(branches_df, selected_branch_ids)
     if selection_df.empty:
         st.info("Click branches in the viewer to build a vessel selection.")
@@ -339,8 +386,70 @@ def _render_manual_review(selected_run_name: str) -> None:
                 "Complete saved vessel(s) in selection: "
                 + ", ".join(f"`{vessel_name}`" for vessel_name in selected_complete_vessels)
             )
-        if has_branching_nodes(branches_df, selected_branch_ids):
-            st.warning("The current selection contains a bifurcation; save one root-to-end path for tortuosity.")
+
+    selected_start_node_id = None
+    selected_end_node_id = None
+    if len(node_ids) >= 2:
+        if st.session_state.get(start_node_key) not in node_ids:
+            st.session_state[start_node_key] = node_ids[0]
+        if st.session_state.get(end_node_key) not in node_ids:
+            st.session_state[end_node_key] = node_ids[-1]
+        if st.session_state[start_node_key] == st.session_state[end_node_key]:
+            st.session_state[end_node_key] = next(
+                node_id for node_id in node_ids if node_id != st.session_state[start_node_key]
+            )
+        if st.session_state.get(next_endpoint_target_key) not in {"start", "end"}:
+            st.session_state[next_endpoint_target_key] = "start"
+
+        endpoint_branch_ids = set(selected_branch_ids)
+        endpoint_branches = [
+            branch
+            for branch in viewer_branches
+            if (
+                isinstance(branch["branchId"], int)
+                and int(branch["branchId"]) in endpoint_branch_ids
+            )
+            or str(branch["branchId"]).startswith("provisional-synthetic")
+        ]
+        st.subheader("Tortuosity endpoints")
+        endpoint_result = NODE_ENDPOINT_VIEWER(
+            data={
+                "imageUrl": bundle["image_url"],
+                "imageWidth": bundle["image_width"],
+                "imageHeight": bundle["image_height"],
+                "branches": endpoint_branches,
+                "nodes": node_options,
+                "startNodeId": int(st.session_state[start_node_key]),
+                "endNodeId": int(st.session_state[end_node_key]),
+                "nextEndpointTarget": st.session_state[next_endpoint_target_key],
+                "baseOpacity": 0.62,
+            },
+            default={
+                "start_node_id": int(st.session_state[start_node_key]),
+                "end_node_id": int(st.session_state[end_node_key]),
+                "next_endpoint_target": st.session_state[next_endpoint_target_key],
+            },
+            on_start_node_id_change=lambda: None,
+            on_end_node_id_change=lambda: None,
+            on_next_endpoint_target_change=lambda: None,
+            key=f"node_endpoint_viewer::{selected_run_name}",
+            width="stretch",
+            height=320,
+        )
+        _sync_endpoint_selection(
+            endpoint_result,
+            start_node_key,
+            end_node_key,
+            next_endpoint_target_key,
+        )
+        selected_start_node_id = int(st.session_state[start_node_key])
+        selected_end_node_id = int(st.session_state[end_node_key])
+        st.caption(
+            f"Start node `{selected_start_node_id}`, end node `{selected_end_node_id}`. "
+            "Each click alternates between setting start and end."
+        )
+    elif selected_branch_ids:
+        st.warning("Select at least one valid skeleton segment to choose tortuosity endpoints.")
 
     bottom_left, bottom_right = st.columns([1.2, 1.0], gap="large")
 
@@ -371,12 +480,17 @@ def _render_manual_review(selected_run_name: str) -> None:
                 if st.button("Apply changes", type="primary", use_container_width=True):
                     if not selected_branch_ids:
                         st.warning("Select at least one branch before applying changes.")
+                    elif selected_start_node_id is None or selected_end_node_id is None:
+                        st.warning("Choose a tortuosity start and end before applying changes.")
+                    elif selected_start_node_id == selected_end_node_id:
+                        st.warning("Start and end must be different nodes.")
                     else:
-                        _stop_if_branching_selection(branches_df, selected_branch_ids)
                         payload, resolution = _build_vessel_payload(
                             branches_df,
                             selected_branch_ids,
                             vessel_category,
+                            selected_start_node_id,
+                            selected_end_node_id,
                         )
                         clean_name = _resolve_clean_vessel_name(
                             vessel_name,
@@ -395,6 +509,9 @@ def _render_manual_review(selected_run_name: str) -> None:
                             editing_original_snapshot_key,
                             vessel_name_reset_key,
                             viewer_reset_key,
+                            start_node_key,
+                            end_node_key,
+                            next_endpoint_target_key,
                         )
                         persist_manual_review(selected_run_dir, review_state, branches_df)
                         _show_saved_vessel_status(clean_name, resolution)
@@ -403,12 +520,17 @@ def _render_manual_review(selected_run_name: str) -> None:
                 if st.button("Save as new", use_container_width=True):
                     if not selected_branch_ids:
                         st.warning("Select at least one branch before saving a vessel.")
+                    elif selected_start_node_id is None or selected_end_node_id is None:
+                        st.warning("Choose a tortuosity start and end before saving a vessel.")
+                    elif selected_start_node_id == selected_end_node_id:
+                        st.warning("Start and end must be different nodes.")
                     else:
-                        _stop_if_branching_selection(branches_df, selected_branch_ids)
                         payload, resolution = _build_vessel_payload(
                             branches_df,
                             selected_branch_ids,
                             vessel_category,
+                            selected_start_node_id,
+                            selected_end_node_id,
                         )
                         clean_name = _resolve_clean_vessel_name(
                             vessel_name if vessel_name.strip() != editing_vessel_name else "",
@@ -425,6 +547,9 @@ def _render_manual_review(selected_run_name: str) -> None:
                             editing_original_snapshot_key,
                             vessel_name_reset_key,
                             viewer_reset_key,
+                            start_node_key,
+                            end_node_key,
+                            next_endpoint_target_key,
                         )
                         persist_manual_review(selected_run_dir, review_state, branches_df)
                         _show_saved_vessel_status(clean_name, resolution)
@@ -437,6 +562,9 @@ def _render_manual_review(selected_run_name: str) -> None:
                         editing_original_snapshot_key,
                         vessel_name_reset_key,
                         viewer_reset_key,
+                        start_node_key,
+                        end_node_key,
+                        next_endpoint_target_key,
                     )
                     st.rerun()
         else:
@@ -445,12 +573,17 @@ def _render_manual_review(selected_run_name: str) -> None:
                 if st.button("Save current vessel", type="primary", use_container_width=True):
                     if not selected_branch_ids:
                         st.warning("Select at least one branch before saving a vessel.")
+                    elif selected_start_node_id is None or selected_end_node_id is None:
+                        st.warning("Choose a tortuosity start and end before saving a vessel.")
+                    elif selected_start_node_id == selected_end_node_id:
+                        st.warning("Start and end must be different nodes.")
                     else:
-                        _stop_if_branching_selection(branches_df, selected_branch_ids)
                         payload, resolution = _build_vessel_payload(
                             branches_df,
                             selected_branch_ids,
                             vessel_category,
+                            selected_start_node_id,
+                            selected_end_node_id,
                         )
                         clean_name = _resolve_clean_vessel_name(
                             vessel_name,
@@ -467,6 +600,9 @@ def _render_manual_review(selected_run_name: str) -> None:
                             editing_original_snapshot_key,
                             vessel_name_reset_key,
                             viewer_reset_key,
+                            start_node_key,
+                            end_node_key,
+                            next_endpoint_target_key,
                         )
                         persist_manual_review(selected_run_dir, review_state, branches_df)
                         _show_saved_vessel_status(clean_name, resolution)
@@ -522,11 +658,18 @@ def _render_manual_review(selected_run_name: str) -> None:
             if clean_name in unmerged_vessel_names:
                 st.warning(f"`{clean_name}` already exists. Choose a different name for the merged vessel.")
                 st.stop()
-            _stop_if_branching_selection(branches_df, merged_branch_ids)
+            if selected_start_node_id is None or selected_end_node_id is None:
+                st.warning("Choose a tortuosity start and end before merging vessels.")
+                st.stop()
+            if selected_start_node_id == selected_end_node_id:
+                st.warning("Start and end must be different nodes.")
+                st.stop()
             payload, resolution = _build_vessel_payload(
                 branches_df,
                 merged_branch_ids,
                 merged_category,
+                selected_start_node_id,
+                selected_end_node_id,
             )
             for selected_vessel_name in selected_complete_vessels:
                 review_state["vessels"].pop(selected_vessel_name, None)
@@ -537,6 +680,9 @@ def _render_manual_review(selected_run_name: str) -> None:
                 editing_original_snapshot_key,
                 vessel_name_reset_key,
                 viewer_reset_key,
+                start_node_key,
+                end_node_key,
+                next_endpoint_target_key,
             )
             persist_manual_review(selected_run_dir, review_state, branches_df)
             st.success(
@@ -548,26 +694,6 @@ def _render_manual_review(selected_run_name: str) -> None:
 
     with bottom_right:
         st.subheader("Saved vessels")
-        if bundle["metadata"].get("deep_backend") == "VascX":
-            if st.button(
-                "Rebuild VascX path vessels",
-                use_container_width=True,
-                help="Replace saved vessels with branchless root-to-end paths from the current VascX skeleton.",
-            ):
-                review_state["vessels"] = build_auto_vascx_vessels(
-                    branches_df,
-                    min_total_length=float(bundle["metadata"].get("vascx_auto_min_vessel_length", 25.0)),
-                )
-                _clear_vessel_draft(
-                    review_state,
-                    editing_vessel_name_key,
-                    editing_original_snapshot_key,
-                    vessel_name_reset_key,
-                    viewer_reset_key,
-                )
-                persist_manual_review(selected_run_dir, review_state, branches_df)
-                st.success("Rebuilt VascX vessels as branchless root-to-end paths.")
-                st.rerun()
         vessel_names = sorted(review_state["vessels"])
         if vessel_names:
             if vessel_load_key not in st.session_state or st.session_state[vessel_load_key] not in vessel_names:

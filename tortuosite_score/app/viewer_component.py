@@ -11,6 +11,15 @@ from tortuosite_score.app.constants import (
 )
 
 
+def _vascx_branch_color(branch_row: pd.Series) -> str:
+    category = branch_row.get("vascx_category", "unknown")
+    if category == "artere":
+        return ARTERE_COLOR
+    if category == "veine":
+        return VEINE_COLOR
+    return DEFAULT_BRANCH_COLOR
+
+
 BRANCH_VIEWER = st.components.v2.component(
     name="retina_branch_viewer",
     html="""
@@ -212,6 +221,193 @@ BRANCH_VIEWER = st.components.v2.component(
 )
 
 
+NODE_ENDPOINT_VIEWER = st.components.v2.component(
+    name="retina_node_endpoint_viewer",
+    html="""
+    <div class="endpoint-shell">
+      <svg id="endpoint-viewer" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    """,
+    css="""
+    .endpoint-shell {
+      width: 100%;
+      height: 100%;
+      min-height: 260px;
+      border: 1px solid rgba(120, 120, 120, 0.35);
+      border-radius: 0.85rem;
+      overflow: hidden;
+      background: #050505;
+    }
+
+    #endpoint-viewer {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: #050505;
+      cursor: pointer;
+    }
+    """,
+    js="""
+    export default function(component) {
+      const { parentElement, data, setStateValue } = component;
+      const svg = parentElement.querySelector("#endpoint-viewer");
+      const svgNs = "http://www.w3.org/2000/svg";
+      let startNodeId = data.startNodeId ?? null;
+      let endNodeId = data.endNodeId ?? null;
+      let nextTarget = data.nextEndpointTarget ?? (startNodeId == null ? "start" : "end");
+
+      function make(tag, attrs = {}) {
+        const node = document.createElementNS(svgNs, tag);
+        Object.entries(attrs).forEach(([key, value]) => {
+          node.setAttribute(key, String(value));
+        });
+        return node;
+      }
+
+      function clear(node) {
+        while (node.firstChild) {
+          node.removeChild(node.firstChild);
+        }
+      }
+
+      function setEndpoint(nodeId) {
+        if (nextTarget === "start") {
+          const previousStart = startNodeId;
+          startNodeId = nodeId;
+          if (endNodeId === nodeId) {
+            endNodeId = previousStart;
+          }
+          nextTarget = "end";
+        } else {
+          const previousEnd = endNodeId;
+          endNodeId = nodeId;
+          if (startNodeId === nodeId) {
+            startNodeId = previousEnd;
+          }
+          nextTarget = "start";
+        }
+        setStateValue("start_node_id", startNodeId);
+        setStateValue("end_node_id", endNodeId);
+        setStateValue("next_endpoint_target", nextTarget);
+      }
+
+      clear(svg);
+
+      const points = [];
+      (data.branches ?? []).forEach((branch) => {
+        (branch.points ?? []).forEach((point) => points.push(point));
+      });
+      (data.nodes ?? []).forEach((node) => points.push([node.x, node.y]));
+
+      const imageWidth = data.imageWidth ?? 1000;
+      const imageHeight = data.imageHeight ?? 1000;
+      let minX = 0;
+      let minY = 0;
+      let maxX = imageWidth;
+      let maxY = imageHeight;
+      if (points.length > 0) {
+        minX = Math.min(...points.map((point) => point[0]));
+        minY = Math.min(...points.map((point) => point[1]));
+        maxX = Math.max(...points.map((point) => point[0]));
+        maxY = Math.max(...points.map((point) => point[1]));
+        const spanX = Math.max(1, maxX - minX);
+        const spanY = Math.max(1, maxY - minY);
+        const padding = Math.max(20, Math.max(spanX, spanY) * 0.12);
+        minX = Math.max(0, minX - padding);
+        minY = Math.max(0, minY - padding);
+        maxX = Math.min(imageWidth, maxX + padding);
+        maxY = Math.min(imageHeight, maxY + padding);
+      }
+
+      const width = Math.max(1, maxX - minX);
+      const height = Math.max(1, maxY - minY);
+      svg.setAttribute("viewBox", `${minX} ${minY} ${width} ${height}`);
+
+      const background = make("rect", {
+        x: minX,
+        y: minY,
+        width,
+        height,
+        fill: "#050505",
+      });
+      svg.appendChild(background);
+
+      if (data.imageUrl) {
+        const image = make("image", {
+          x: 0,
+          y: 0,
+          width: imageWidth,
+          height: imageHeight,
+          href: data.imageUrl,
+          opacity: data.baseOpacity ?? 0.55,
+          preserveAspectRatio: "none",
+        });
+        svg.appendChild(image);
+      }
+
+      (data.branches ?? []).forEach((branch) => {
+        const pointsAttr = (branch.points ?? [])
+          .map((point) => `${point[0]},${point[1]}`)
+          .join(" ");
+        (branch.strokes ?? [{ color: "#00c2a8", width: 3 }]).forEach((strokeLayer) => {
+          const polyline = make("polyline", {
+            points: pointsAttr,
+            fill: "none",
+            stroke: strokeLayer.color ?? "#00c2a8",
+            "stroke-width": strokeLayer.width ?? 3,
+            "stroke-opacity": strokeLayer.opacity ?? 1,
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round",
+            "vector-effect": "non-scaling-stroke",
+          });
+          polyline.style.pointerEvents = "none";
+          svg.appendChild(polyline);
+        });
+      });
+
+      const markerRadius = Math.max(3, Math.min(width, height) * 0.01);
+      const labelFontSize = Math.max(4.5, Math.min(7.5, Math.min(width, height) * 0.012));
+      (data.nodes ?? []).forEach((node) => {
+        const isStart = node.node_id === startNodeId;
+        const isEnd = node.node_id === endNodeId;
+        const circle = make("circle", {
+          cx: node.x,
+          cy: node.y,
+          r: markerRadius,
+          fill: isStart ? "#00c2a8" : isEnd ? "#ffd166" : "rgba(5, 5, 5, 0.85)",
+          stroke: isStart ? "#ffffff" : isEnd ? "#ffffff" : "rgba(255, 255, 255, 0.9)",
+          "stroke-width": isStart || isEnd ? 3 : 2,
+          "vector-effect": "non-scaling-stroke",
+        });
+        circle.addEventListener("click", (event) => {
+          event.stopPropagation();
+          setEndpoint(node.node_id);
+        });
+        svg.appendChild(circle);
+
+        const label = make("text", {
+          x: node.x,
+          y: node.y - markerRadius * 1.2,
+          fill: "#ffffff",
+          "font-size": labelFontSize,
+          "font-weight": 800,
+          "text-anchor": "middle",
+          "paint-order": "stroke",
+          stroke: "rgba(0, 0, 0, 0.8)",
+          "stroke-width": 1.1,
+          "vector-effect": "non-scaling-stroke",
+        });
+        label.textContent = String(node.node_id);
+        label.style.pointerEvents = "none";
+        svg.appendChild(label);
+      });
+
+      return () => {};
+    }
+    """,
+)
+
+
 def build_viewer_branches(
     branches_df: pd.DataFrame,
     paths_payload: list[dict],
@@ -240,6 +436,7 @@ def build_viewer_branches(
 
     selected_branch_set = set(int(branch_id) for branch_id in review_state["selected_branch_ids"])
     path_map = {item["branchId"]: item for item in paths_payload}
+    branch_rows = branches_df.set_index("branch_id", drop=False)
     viewer_branches: list[dict] = []
     for branch_id, memberships in branch_memberships.items():
         path = path_map.get(branch_id)
@@ -261,7 +458,7 @@ def build_viewer_branches(
         else:
             strokes.append(
                 {
-                    "color": DEFAULT_BRANCH_COLOR,
+                    "color": _vascx_branch_color(branch_rows.loc[branch_id]),
                     "width": 2.4,
                 }
             )

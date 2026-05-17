@@ -25,14 +25,11 @@ def get_or_create_review_state(
                 "category": vessel.get("category", "artere"),
                 "branch_ids": vessel.get("branch_ids", []),
                 "synthetic_links": vessel.get("synthetic_links", []),
+                "start_node_id": vessel.get("start_node_id"),
+                "end_node_id": vessel.get("end_node_id"),
             }
             for vessel_name, vessel in state.get("vessels", {}).items()
         }
-        if not vessels and auto_create_vessels and branches_df is not None:
-            vessels = build_auto_vascx_vessels(
-                branches_df,
-                min_total_length=auto_min_vessel_length,
-            )
         st.session_state[state_key] = {
             "selected_branch_ids": [],
             "vessels": vessels,
@@ -257,6 +254,34 @@ def resolve_vessel_branch_ids(
 def has_branching_nodes(branches_df: pd.DataFrame, branch_ids: list[int]) -> bool:
     adjacency, _ = _build_graph(branches_df, branch_ids)
     return any(len(edges) > 2 for edges in adjacency.values())
+
+
+def build_node_options(branches_df: pd.DataFrame, branch_ids: list[int]) -> list[dict[str, object]]:
+    adjacency, node_positions = _build_graph(branches_df, branch_ids)
+    root_distances = _node_root_distances(branches_df)
+    options: list[dict[str, object]] = []
+    for node_id, position in node_positions.items():
+        x, y = position
+        degree = len(adjacency.get(node_id, []))
+        options.append(
+            {
+                "node_id": int(node_id),
+                "x": float(x),
+                "y": float(y),
+                "degree": int(degree),
+                "root_distance": float(root_distances.get(node_id, np.nan)),
+            }
+        )
+    return sorted(
+        options,
+        key=lambda option: (
+            np.inf
+            if np.isnan(float(option["root_distance"]))
+            else float(option["root_distance"]),
+            int(option["degree"]) > 1,
+            int(option["node_id"]),
+        ),
+    )
 
 
 def _candidate_nodes_for_component(
@@ -491,6 +516,8 @@ def score_vessel(
     branches_df: pd.DataFrame,
     branch_ids: list[int],
     synthetic_links: list[dict[str, object]] | None = None,
+    start_node_id: int | None = None,
+    end_node_id: int | None = None,
 ) -> dict[str, object]:
     selected = branches_df[branches_df["branch_id"].isin(branch_ids)].copy()
     if selected.empty:
@@ -503,6 +530,8 @@ def score_vessel(
             "length": np.nan,
             "chord": np.nan,
             "tortuosity": np.nan,
+            "start_node_id": np.nan,
+            "end_node_id": np.nan,
         }
 
     initial_adjacency, _ = _build_graph(branches_df, branch_ids)
@@ -538,6 +567,7 @@ def score_vessel(
     components = _connected_components(adjacency)
     component_branch_lengths: list[tuple[set[int], float]] = []
     for component in components:
+        # Sum each unique segment once in this undirected component.
         branch_ids_in_component: set[int] = set()
         total_length = 0.0
         for node_id in component:
@@ -547,10 +577,9 @@ def score_vessel(
                     total_length += length
         component_branch_lengths.append((component, total_length))
 
-    active_component = max(component_branch_lengths, key=lambda item: item[1])[0]
-    leaves = [node_id for node_id in active_component if len(adjacency[node_id]) <= 1]
-    if len(leaves) < 2:
-        leaves = list(active_component)
+    active_component, active_component_total_length = max(
+        component_branch_lengths, key=lambda item: item[1]
+    )
 
     def shortest_paths(start: int) -> dict[int, float]:
         distances = {start: 0.0}
@@ -571,22 +600,37 @@ def score_vessel(
                     distances[neighbor] = candidate
         return distances
 
-    best_start = leaves[0]
-    best_end = leaves[0]
-    best_length = 0.0
-    for start in leaves:
-        distances = shortest_paths(start)
-        for end in leaves:
-            candidate = distances.get(end, 0.0)
-            if candidate > best_length:
-                best_start = start
-                best_end = end
-                best_length = candidate
+    manual_start = int(start_node_id) if start_node_id is not None else None
+    manual_end = int(end_node_id) if end_node_id is not None else None
+    if (
+        manual_start in active_component
+        and manual_end in active_component
+        and manual_start != manual_end
+    ):
+        best_start = int(manual_start)
+        best_end = int(manual_end)
+        best_length = shortest_paths(best_start).get(best_end, 0.0)
+    else:
+        leaves = [node_id for node_id in active_component if len(adjacency[node_id]) <= 1]
+        if len(leaves) < 2:
+            leaves = list(active_component)
+
+        best_start = leaves[0]
+        best_end = leaves[0]
+        best_length = 0.0
+        for start in leaves:
+            distances = shortest_paths(start)
+            for end in leaves:
+                candidate = distances.get(end, 0.0)
+                if candidate > best_length:
+                    best_start = start
+                    best_end = end
+                    best_length = candidate
 
     root_xy = np.array(node_positions[best_start], dtype=float)
     end_xy = np.array(node_positions[best_end], dtype=float)
     chord = float(np.linalg.norm(end_xy - root_xy))
-    path_length = float(best_length)
+    path_length = float(active_component_total_length)
 
     return {
         "branch_count": int(len(selected)),
@@ -597,6 +641,8 @@ def score_vessel(
         "length": path_length,
         "chord": chord,
         "tortuosity": (path_length / chord) if chord > 0 else np.nan,
+        "start_node_id": int(best_start),
+        "end_node_id": int(best_end),
     }
 
 
@@ -617,12 +663,16 @@ def persist_manual_review(run_dir: Path, state: dict, branches_df: pd.DataFrame)
             branches_df,
             vessel["branch_ids"],
             vessel.get("synthetic_links", []),
+            vessel.get("start_node_id"),
+            vessel.get("end_node_id"),
         )
         rows.append(
             {
                 "vessel_name": vessel_name,
                 "category": vessel["category"],
                 "branch_ids": json.dumps(vessel["branch_ids"]),
+                "start_node_id": metrics["start_node_id"],
+                "end_node_id": metrics["end_node_id"],
                 "branch_count": metrics["branch_count"],
                 "component_count": metrics["component_count"],
                 "bridge_branch_count": metrics["bridge_branch_count"],
@@ -641,6 +691,8 @@ def persist_manual_review(run_dir: Path, state: dict, branches_df: pd.DataFrame)
             "vessel_name",
             "category",
             "branch_ids",
+            "start_node_id",
+            "end_node_id",
             "branch_count",
             "component_count",
             "bridge_branch_count",
@@ -688,11 +740,15 @@ def build_vessel_scores_table(review_state: dict, branches_df: pd.DataFrame) -> 
             branches_df,
             vessel["branch_ids"],
             vessel.get("synthetic_links", []),
+            vessel.get("start_node_id"),
+            vessel.get("end_node_id"),
         )
         rows.append(
             {
                 "Vessel": vessel_name,
                 "Category": vessel["category"],
+                "Start node": metrics["start_node_id"],
+                "End node": metrics["end_node_id"],
                 "Branches": len(vessel["branch_ids"]),
                 "Components": metrics["component_count"],
                 "Auto bridges": metrics["bridge_branch_count"],
