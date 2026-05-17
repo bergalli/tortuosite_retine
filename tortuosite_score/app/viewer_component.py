@@ -71,6 +71,31 @@ BRANCH_VIEWER = st.components.v2.component(
         setStateValue("selected_branch_ids", currentSelection);
       }
 
+      function toggleVessel(branch) {
+        const targetBranchIds = Array.isArray(branch.vesselBranchIds) && branch.vesselBranchIds.length > 0
+          ? branch.vesselBranchIds
+          : [branch.branchId];
+        const next = new Set(currentSelection);
+        const isSelected = targetBranchIds.every((branchId) => next.has(branchId));
+        targetBranchIds.forEach((branchId) => {
+          if (isSelected) {
+            next.delete(branchId);
+          } else {
+            next.add(branchId);
+          }
+        });
+        currentSelection = Array.from(next).sort((a, b) => a - b);
+        setStateValue("selected_branch_ids", currentSelection);
+      }
+
+      function toggleSelection(branch) {
+        if (data.selectionMode === "vessel") {
+          toggleVessel(branch);
+        } else {
+          toggleBranch(branch.branchId);
+        }
+      }
+
       clear(svg);
 
       const width = data.imageWidth ?? 1000;
@@ -137,7 +162,7 @@ BRANCH_VIEWER = st.components.v2.component(
           if (!branch.locked) {
             hitArea.addEventListener("click", (event) => {
               event.stopPropagation();
-              toggleBranch(branch.branchId);
+              toggleSelection(branch);
             });
           }
           branchGroup.appendChild(hitArea);
@@ -197,12 +222,20 @@ def build_viewer_branches(
     branch_memberships: dict[int, list[str]] = {
         int(branch_id): [] for branch_id in branches_df["branch_id"].astype(int).tolist()
     }
+    branch_vessels: dict[int, list[str]] = {
+        int(branch_id): [] for branch_id in branches_df["branch_id"].astype(int).tolist()
+    }
+    vessel_branch_ids = {
+        vessel_name: sorted(int(branch_id) for branch_id in vessel["branch_ids"])
+        for vessel_name, vessel in review_state["vessels"].items()
+    }
     assigned_branch_ids: set[int] = set()
-    for vessel in review_state["vessels"].values():
+    for vessel_name, vessel in review_state["vessels"].items():
         color = ARTERE_COLOR if vessel["category"] == "artere" else VEINE_COLOR
         for branch_id in vessel["branch_ids"]:
             branch_id = int(branch_id)
             branch_memberships.setdefault(branch_id, []).append(color)
+            branch_vessels.setdefault(branch_id, []).append(vessel_name)
             assigned_branch_ids.add(branch_id)
 
     selected_branch_set = set(int(branch_id) for branch_id in review_state["selected_branch_ids"])
@@ -244,6 +277,14 @@ def build_viewer_branches(
         viewer_branches.append(
             {
                 "branchId": branch_id,
+                "vesselBranchIds": sorted(
+                    {
+                        linked_branch_id
+                        for vessel_name in branch_vessels.get(branch_id, [])
+                        for linked_branch_id in vessel_branch_ids.get(vessel_name, [])
+                    }
+                ),
+                "vesselNames": branch_vessels.get(branch_id, []),
                 "points": path["points"],
                 "label": path["label"],
                 "labelColor": SELECTED_COLOR if is_selected else "#ffffff",

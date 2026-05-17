@@ -11,9 +11,11 @@ from tortuosite_score.app.review_data import (
     slugify_name,
 )
 from tortuosite_score.app.review_state import (
+    build_auto_vascx_vessels,
     build_selection_table,
     build_vessel_scores_table,
     get_or_create_review_state,
+    has_branching_nodes,
     next_default_vessel_name,
     persist_manual_review,
     synthesize_missing_links,
@@ -82,8 +84,6 @@ def _render_run_selector() -> str | None:
 def _sync_viewer_selection(
     viewer_result,
     review_state: dict,
-    selected_run_dir,
-    branches_df: pd.DataFrame,
 ) -> None:
     previous_selection = list(review_state["selected_branch_ids"])
     if getattr(viewer_result, "selected_branch_ids", None) is None:
@@ -96,8 +96,122 @@ def _sync_viewer_selection(
         return
 
     review_state["selected_branch_ids"] = updated_selection
-    persist_manual_review(selected_run_dir, review_state, branches_df)
     st.rerun()
+
+
+def _clear_vessel_draft(
+    review_state: dict,
+    editing_vessel_name_key: str,
+    editing_original_snapshot_key: str,
+    vessel_name_reset_key: str,
+    viewer_reset_key: str,
+) -> None:
+    review_state["selected_branch_ids"] = []
+    st.session_state.pop(editing_vessel_name_key, None)
+    st.session_state.pop(editing_original_snapshot_key, None)
+    st.session_state[vessel_name_reset_key] = True
+    st.session_state[viewer_reset_key] += 1
+
+
+def _start_vessel_edit(
+    vessel_name: str,
+    review_state: dict,
+    editing_vessel_name_key: str,
+    editing_original_snapshot_key: str,
+    vessel_name_key: str,
+    vessel_category_key: str,
+) -> None:
+    vessel = review_state["vessels"][vessel_name]
+    branch_ids = sorted(int(branch_id) for branch_id in vessel["branch_ids"])
+    review_state["selected_branch_ids"] = branch_ids
+    st.session_state[editing_vessel_name_key] = vessel_name
+    st.session_state[editing_original_snapshot_key] = {
+        "name": vessel_name,
+        "category": vessel["category"],
+        "branch_ids": branch_ids,
+        "synthetic_links": list(vessel.get("synthetic_links", [])),
+    }
+    st.session_state[vessel_name_key] = vessel_name
+    st.session_state[vessel_category_key] = vessel["category"]
+
+
+def _resolve_clean_vessel_name(
+    vessel_name: str,
+    vessel_category: str,
+    vessels: dict[str, dict],
+) -> str:
+    return vessel_name.strip() or next_default_vessel_name(vessels, vessel_category)
+
+
+def _build_vessel_payload(
+    branches_df: pd.DataFrame,
+    selected_branch_ids: list[int],
+    vessel_category: str,
+) -> tuple[dict, dict]:
+    resolution = synthesize_missing_links(branches_df, selected_branch_ids)
+    payload = {
+        "category": vessel_category,
+        "branch_ids": resolution["branch_ids"],
+        "synthetic_links": resolution["synthetic_links"],
+    }
+    return payload, resolution
+
+
+def _show_saved_vessel_status(vessel_name: str, resolution: dict) -> None:
+    if len(resolution["synthetic_links"]) > 0:
+        st.success(
+            f"Saved vessel `{vessel_name}` with {len(resolution['synthetic_links'])} synthetic link(s)."
+        )
+    elif resolution["component_count"] > 1:
+        st.warning(f"Saved vessel `{vessel_name}` with unresolved disconnected pieces.")
+    else:
+        st.success(f"Saved vessel `{vessel_name}`.")
+
+
+def _stop_if_branching_selection(branches_df: pd.DataFrame, selected_branch_ids: list[int]) -> None:
+    if has_branching_nodes(branches_df, selected_branch_ids):
+        st.warning(
+            "This selection contains a bifurcation. Save one root-to-end vessel path at a time."
+        )
+        st.stop()
+
+
+def _branch_length_sum(branches_df: pd.DataFrame, branch_ids: list[int]) -> float:
+    return float(
+        branches_df.loc[
+            branches_df["branch_id"].isin([int(branch_id) for branch_id in branch_ids]),
+            "branch-distance",
+        ].sum()
+    )
+
+
+def _selected_complete_vessel_names(
+    review_state: dict,
+    selected_branch_ids: list[int],
+) -> list[str]:
+    selected_branch_set = set(int(branch_id) for branch_id in selected_branch_ids)
+    selected_vessels: list[str] = []
+    for vessel_name, vessel in sorted(review_state["vessels"].items()):
+        vessel_branch_ids = {int(branch_id) for branch_id in vessel["branch_ids"]}
+        if vessel_branch_ids and vessel_branch_ids.issubset(selected_branch_set):
+            selected_vessels.append(vessel_name)
+    return selected_vessels
+
+
+def _dominant_category_for_vessels(
+    branches_df: pd.DataFrame,
+    review_state: dict,
+    vessel_names: list[str],
+) -> str:
+    category_lengths = {"artere": 0.0, "veine": 0.0}
+    for vessel_name in vessel_names:
+        vessel = review_state["vessels"][vessel_name]
+        category = vessel["category"]
+        category_lengths[category] = category_lengths.get(category, 0.0) + _branch_length_sum(
+            branches_df,
+            vessel["branch_ids"],
+        )
+    return "veine" if category_lengths["veine"] > category_lengths["artere"] else "artere"
 
 
 def _render_manual_review(selected_run_name: str) -> None:
@@ -117,8 +231,11 @@ def _render_manual_review(selected_run_name: str) -> None:
     vessel_name_reset_key = f"vessel_name_reset::{selected_run_name}"
     viewer_reset_key = f"viewer_reset_nonce::{selected_run_name}"
     pending_edit_key = f"pending_vessel_edit::{selected_run_name}"
+    editing_vessel_name_key = f"editing_vessel_name::{selected_run_name}"
+    editing_original_snapshot_key = f"editing_original_snapshot::{selected_run_name}"
     if st.session_state.get(vessel_name_reset_key):
         st.session_state[vessel_name_key] = ""
+        st.session_state[vessel_category_key] = "artere"
         st.session_state[vessel_name_reset_key] = False
     if vessel_name_key not in st.session_state:
         st.session_state[vessel_name_key] = ""
@@ -128,10 +245,26 @@ def _render_manual_review(selected_run_name: str) -> None:
         st.session_state[viewer_reset_key] = 0
     pending_vessel_edit = st.session_state.pop(pending_edit_key, None)
     if pending_vessel_edit in review_state["vessels"]:
-        vessel = review_state["vessels"][pending_vessel_edit]
-        review_state["selected_branch_ids"] = list(vessel["branch_ids"])
-        st.session_state[vessel_name_key] = pending_vessel_edit
-        st.session_state[vessel_category_key] = vessel["category"]
+        _start_vessel_edit(
+            pending_vessel_edit,
+            review_state,
+            editing_vessel_name_key,
+            editing_original_snapshot_key,
+            vessel_name_key,
+            vessel_category_key,
+        )
+
+    editing_vessel_name = st.session_state.get(editing_vessel_name_key)
+    if editing_vessel_name and editing_vessel_name not in review_state["vessels"]:
+        _clear_vessel_draft(
+            review_state,
+            editing_vessel_name_key,
+            editing_original_snapshot_key,
+            vessel_name_reset_key,
+            viewer_reset_key,
+        )
+        editing_vessel_name = None
+    is_editing_vessel = editing_vessel_name is not None
 
     with st.sidebar:
         st.header("Viewer")
@@ -139,6 +272,12 @@ def _render_manual_review(selected_run_name: str) -> None:
         show_skeleton = st.toggle("Show skeleton", value=True)
         show_labels = st.toggle("Show branch IDs", value=False)
         show_vessel_labels = st.toggle("Show vessel IDs", value=False)
+        selection_mode = st.radio(
+            "Click selection",
+            options=["Branch parts", "Whole vessels"],
+            horizontal=True,
+            help="Whole vessels selects every branch from the saved vessel you click.",
+        )
         base_opacity = st.slider("Base image opacity", 0.0, 1.0, 0.95, 0.05)
     allow_reuse_assigned = True
 
@@ -160,6 +299,7 @@ def _render_manual_review(selected_run_name: str) -> None:
                 provisional_synthetic_links=provisional_resolution["synthetic_links"],
             ),
             "selectedBranchIds": sorted(int(branch_id) for branch_id in review_state["selected_branch_ids"]),
+            "selectionMode": "vessel" if selection_mode == "Whole vessels" else "branch",
             "showBaseImage": show_base_image,
             "showSkeleton": show_skeleton,
             "showLabels": show_labels,
@@ -184,22 +324,32 @@ def _render_manual_review(selected_run_name: str) -> None:
     _sync_viewer_selection(
         viewer_result=viewer_result,
         review_state=review_state,
-        selected_run_dir=selected_run_dir,
-        branches_df=branches_df,
     )
 
     selected_branch_ids = sorted(int(branch_id) for branch_id in review_state["selected_branch_ids"])
+    selected_complete_vessels = _selected_complete_vessel_names(review_state, selected_branch_ids)
     selection_df = build_selection_table(branches_df, selected_branch_ids)
     if selection_df.empty:
         st.info("Click branches in the viewer to build a vessel selection.")
     else:
         st.subheader("Current selection")
         st.dataframe(selection_df, use_container_width=True, hide_index=True)
+        if selected_complete_vessels:
+            st.caption(
+                "Complete saved vessel(s) in selection: "
+                + ", ".join(f"`{vessel_name}`" for vessel_name in selected_complete_vessels)
+            )
+        if has_branching_nodes(branches_df, selected_branch_ids):
+            st.warning("The current selection contains a bifurcation; save one root-to-end path for tortuosity.")
 
     bottom_left, bottom_right = st.columns([1.2, 1.0], gap="large")
 
     with bottom_left:
-        st.subheader("Current vessel")
+        st.subheader("Vessel draft")
+        if is_editing_vessel:
+            st.info(f"Editing `{editing_vessel_name}`. Changes stay temporary until you apply them.")
+        else:
+            st.info("New vessel draft. Select branches, then save it as a vessel.")
         vessel_category = st.radio(
             "Vessel category",
             options=["artere", "veine"],
@@ -207,53 +357,217 @@ def _render_manual_review(selected_run_name: str) -> None:
             key=vessel_category_key,
         )
         vessel_name = st.text_input("Vessel name", key=vessel_name_key)
-        st.caption(
-            f"If left empty, the next name will be `{next_default_vessel_name(review_state['vessels'], vessel_category)}`."
-        )
+        if is_editing_vessel:
+            st.caption("Renaming here will replace the saved vessel name when changes are applied.")
+        else:
+            st.caption(
+                f"If left empty, the next name will be `{next_default_vessel_name(review_state['vessels'], vessel_category)}`."
+            )
         st.caption(f"{len(selected_branch_ids)} branch(es) currently selected.")
-        save_col, clear_col, reset_col = st.columns(3)
-        with save_col:
-            if st.button("Save current vessel", type="primary", use_container_width=True):
-                if not selected_branch_ids:
-                    st.warning("Select at least one branch before saving a vessel.")
-                else:
-                    resolution = synthesize_missing_links(branches_df, selected_branch_ids)
-                    clean_name = vessel_name.strip() or next_default_vessel_name(
-                        review_state["vessels"],
-                        vessel_category,
-                    )
-                    review_state["vessels"][clean_name] = {
-                        "category": vessel_category,
-                        "branch_ids": resolution["branch_ids"],
-                        "synthetic_links": resolution["synthetic_links"],
-                    }
-                    review_state["selected_branch_ids"] = []
-                    st.session_state[vessel_name_reset_key] = True
-                    st.session_state[viewer_reset_key] += 1
-                    persist_manual_review(selected_run_dir, review_state, branches_df)
-                    if len(resolution["synthetic_links"]) > 0:
-                        st.success(
-                            f"Saved vessel `{clean_name}` with {len(resolution['synthetic_links'])} synthetic link(s)."
-                        )
-                    elif resolution["component_count"] > 1:
-                        st.warning(
-                            f"Saved vessel `{clean_name}` with unresolved disconnected pieces."
-                        )
+
+        if is_editing_vessel:
+            apply_col, save_new_col, cancel_col = st.columns(3)
+            with apply_col:
+                if st.button("Apply changes", type="primary", use_container_width=True):
+                    if not selected_branch_ids:
+                        st.warning("Select at least one branch before applying changes.")
                     else:
-                        st.success(f"Saved vessel `{clean_name}`.")
+                        _stop_if_branching_selection(branches_df, selected_branch_ids)
+                        payload, resolution = _build_vessel_payload(
+                            branches_df,
+                            selected_branch_ids,
+                            vessel_category,
+                        )
+                        clean_name = _resolve_clean_vessel_name(
+                            vessel_name,
+                            vessel_category,
+                            review_state["vessels"],
+                        )
+                        if clean_name != editing_vessel_name and clean_name in review_state["vessels"]:
+                            st.warning(f"`{clean_name}` already exists. Choose a different name before applying.")
+                            st.stop()
+                        if clean_name != editing_vessel_name:
+                            review_state["vessels"].pop(editing_vessel_name, None)
+                        review_state["vessels"][clean_name] = payload
+                        _clear_vessel_draft(
+                            review_state,
+                            editing_vessel_name_key,
+                            editing_original_snapshot_key,
+                            vessel_name_reset_key,
+                            viewer_reset_key,
+                        )
+                        persist_manual_review(selected_run_dir, review_state, branches_df)
+                        _show_saved_vessel_status(clean_name, resolution)
+                        st.rerun()
+            with save_new_col:
+                if st.button("Save as new", use_container_width=True):
+                    if not selected_branch_ids:
+                        st.warning("Select at least one branch before saving a vessel.")
+                    else:
+                        _stop_if_branching_selection(branches_df, selected_branch_ids)
+                        payload, resolution = _build_vessel_payload(
+                            branches_df,
+                            selected_branch_ids,
+                            vessel_category,
+                        )
+                        clean_name = _resolve_clean_vessel_name(
+                            vessel_name if vessel_name.strip() != editing_vessel_name else "",
+                            vessel_category,
+                            review_state["vessels"],
+                        )
+                        if clean_name in review_state["vessels"]:
+                            st.warning(f"`{clean_name}` already exists. Choose a different name for the new vessel.")
+                            st.stop()
+                        review_state["vessels"][clean_name] = payload
+                        _clear_vessel_draft(
+                            review_state,
+                            editing_vessel_name_key,
+                            editing_original_snapshot_key,
+                            vessel_name_reset_key,
+                            viewer_reset_key,
+                        )
+                        persist_manual_review(selected_run_dir, review_state, branches_df)
+                        _show_saved_vessel_status(clean_name, resolution)
+                        st.rerun()
+            with cancel_col:
+                if st.button("Cancel edit", use_container_width=True):
+                    _clear_vessel_draft(
+                        review_state,
+                        editing_vessel_name_key,
+                        editing_original_snapshot_key,
+                        vessel_name_reset_key,
+                        viewer_reset_key,
+                    )
                     st.rerun()
-        with clear_col:
-            if st.button("Clear typed name", use_container_width=True):
-                st.session_state[vessel_name_reset_key] = True
-                st.rerun()
-        with reset_col:
-            if st.button("Clear selection", use_container_width=True):
-                review_state["selected_branch_ids"] = []
-                st.session_state[viewer_reset_key] += 1
-                st.rerun()
+        else:
+            save_col, clear_col, reset_col = st.columns(3)
+            with save_col:
+                if st.button("Save current vessel", type="primary", use_container_width=True):
+                    if not selected_branch_ids:
+                        st.warning("Select at least one branch before saving a vessel.")
+                    else:
+                        _stop_if_branching_selection(branches_df, selected_branch_ids)
+                        payload, resolution = _build_vessel_payload(
+                            branches_df,
+                            selected_branch_ids,
+                            vessel_category,
+                        )
+                        clean_name = _resolve_clean_vessel_name(
+                            vessel_name,
+                            vessel_category,
+                            review_state["vessels"],
+                        )
+                        if clean_name in review_state["vessels"]:
+                            st.warning(f"`{clean_name}` already exists. Choose a different name.")
+                            st.stop()
+                        review_state["vessels"][clean_name] = payload
+                        _clear_vessel_draft(
+                            review_state,
+                            editing_vessel_name_key,
+                            editing_original_snapshot_key,
+                            vessel_name_reset_key,
+                            viewer_reset_key,
+                        )
+                        persist_manual_review(selected_run_dir, review_state, branches_df)
+                        _show_saved_vessel_status(clean_name, resolution)
+                        st.rerun()
+            with clear_col:
+                if st.button("Clear typed name", use_container_width=True):
+                    st.session_state[vessel_name_reset_key] = True
+                    st.rerun()
+            with reset_col:
+                if st.button("Clear draft selection", use_container_width=True):
+                    review_state["selected_branch_ids"] = []
+                    st.session_state[viewer_reset_key] += 1
+                    st.rerun()
+
+        if is_editing_vessel:
+            _, clear_edit_selection_col = st.columns([2, 1])
+            with clear_edit_selection_col:
+                if st.button("Clear draft selection", use_container_width=True):
+                    review_state["selected_branch_ids"] = []
+                    st.session_state[viewer_reset_key] += 1
+                    st.rerun()
+
+        merge_ready = len(selected_complete_vessels) >= 2
+        merge_label = (
+            f"Merge {len(selected_complete_vessels)} selected vessels"
+            if merge_ready
+            else "Merge selected vessels"
+        )
+        if st.button(
+            merge_label,
+            disabled=not merge_ready,
+            use_container_width=True,
+            help="Select at least two complete saved vessels, usually with Whole vessels mode.",
+        ):
+            merged_branch_ids = sorted(
+                {
+                    int(branch_id)
+                    for selected_vessel_name in selected_complete_vessels
+                    for branch_id in review_state["vessels"][selected_vessel_name]["branch_ids"]
+                }
+            )
+            merged_category = _dominant_category_for_vessels(
+                branches_df,
+                review_state,
+                selected_complete_vessels,
+            )
+            clean_name = _resolve_clean_vessel_name(
+                vessel_name,
+                merged_category,
+                review_state["vessels"],
+            )
+            unmerged_vessel_names = set(review_state["vessels"]) - set(selected_complete_vessels)
+            if clean_name in unmerged_vessel_names:
+                st.warning(f"`{clean_name}` already exists. Choose a different name for the merged vessel.")
+                st.stop()
+            _stop_if_branching_selection(branches_df, merged_branch_ids)
+            payload, resolution = _build_vessel_payload(
+                branches_df,
+                merged_branch_ids,
+                merged_category,
+            )
+            for selected_vessel_name in selected_complete_vessels:
+                review_state["vessels"].pop(selected_vessel_name, None)
+            review_state["vessels"][clean_name] = payload
+            _clear_vessel_draft(
+                review_state,
+                editing_vessel_name_key,
+                editing_original_snapshot_key,
+                vessel_name_reset_key,
+                viewer_reset_key,
+            )
+            persist_manual_review(selected_run_dir, review_state, branches_df)
+            st.success(
+                f"Merged {len(selected_complete_vessels)} vessels into `{clean_name}` as `{merged_category}`."
+            )
+            if resolution["component_count"] > 1:
+                st.info("The merged vessel still has disconnected pieces, so synthetic links were added.")
+            st.rerun()
 
     with bottom_right:
         st.subheader("Saved vessels")
+        if bundle["metadata"].get("deep_backend") == "VascX":
+            if st.button(
+                "Rebuild VascX path vessels",
+                use_container_width=True,
+                help="Replace saved vessels with branchless root-to-end paths from the current VascX skeleton.",
+            ):
+                review_state["vessels"] = build_auto_vascx_vessels(
+                    branches_df,
+                    min_total_length=float(bundle["metadata"].get("vascx_auto_min_vessel_length", 25.0)),
+                )
+                _clear_vessel_draft(
+                    review_state,
+                    editing_vessel_name_key,
+                    editing_original_snapshot_key,
+                    vessel_name_reset_key,
+                    viewer_reset_key,
+                )
+                persist_manual_review(selected_run_dir, review_state, branches_df)
+                st.success("Rebuilt VascX vessels as branchless root-to-end paths.")
+                st.rerun()
         vessel_names = sorted(review_state["vessels"])
         if vessel_names:
             if vessel_load_key not in st.session_state or st.session_state[vessel_load_key] not in vessel_names:
@@ -265,7 +579,7 @@ def _render_manual_review(selected_run_name: str) -> None:
             )
             load_col, add_col, delete_col = st.columns(3)
             with load_col:
-                if st.button("Edit vessel", use_container_width=True):
+                if st.button("Open for editing", use_container_width=True):
                     st.session_state[pending_edit_key] = vessel_to_load
                     st.session_state[viewer_reset_key] += 1
                     st.rerun()
@@ -282,7 +596,11 @@ def _render_manual_review(selected_run_name: str) -> None:
             with delete_col:
                 if st.button("Delete saved vessel", use_container_width=True):
                     del review_state["vessels"][vessel_to_load]
+                    if st.session_state.get(editing_vessel_name_key) == vessel_to_load:
+                        st.session_state.pop(editing_vessel_name_key, None)
+                        st.session_state.pop(editing_original_snapshot_key, None)
                     review_state["selected_branch_ids"] = []
+                    st.session_state[vessel_name_reset_key] = True
                     st.session_state[viewer_reset_key] += 1
                     persist_manual_review(selected_run_dir, review_state, branches_df)
                     st.rerun()

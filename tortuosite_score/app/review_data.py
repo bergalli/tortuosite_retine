@@ -89,6 +89,26 @@ def load_review_bundle(run_dir_str: str) -> dict:
     branches_df["vascx_category"] = "unknown"
     branches_df["vascx_artery_pixels"] = 0
     branches_df["vascx_vein_pixels"] = 0
+    branches_df["path_points"] = [[] for _ in range(branch_count)]
+
+    disc_center_xy: tuple[float, float] | None = None
+    for disc_file_name in ["04c_vascx_disc_mask.png", "04e_estimated_disc_mask.png"]:
+        disc_mask = cv2.imread(str(output_dir / disc_file_name), cv2.IMREAD_GRAYSCALE)
+        if disc_mask is None or not np.any(disc_mask > 0):
+            continue
+        disc_rows, disc_cols = np.where(disc_mask > 0)
+        disc_center_xy = (float(disc_cols.mean()), float(disc_rows.mean()))
+        break
+    if disc_center_xy is not None:
+        disc_x, disc_y = disc_center_xy
+        branches_df["root-distance-src"] = np.hypot(
+            branches_df["image-coord-src-1"].astype(float) - disc_x,
+            branches_df["image-coord-src-0"].astype(float) - disc_y,
+        )
+        branches_df["root-distance-dst"] = np.hypot(
+            branches_df["image-coord-dst-1"].astype(float) - disc_x,
+            branches_df["image-coord-dst-0"].astype(float) - disc_y,
+        )
 
     paths_payload: list[dict] = []
     for branch_id in range(branch_count):
@@ -109,10 +129,12 @@ def load_review_bundle(run_dir_str: str) -> dict:
             elif artery_pixels + vein_pixels > 0:
                 branches_df.loc[branch_id, "vascx_category"] = "mixed"
         centroid = coords.mean(axis=0)
+        path_points = [[int(col), int(row)] for row, col in coords]
+        branches_df.at[branch_id, "path_points"] = path_points
         paths_payload.append(
             {
                 "branchId": int(branch_id),
-                "points": [[int(col), int(row)] for row, col in coords],
+                "points": path_points,
                 "label": [int(round(centroid[1])), int(round(centroid[0]))],
             }
         )

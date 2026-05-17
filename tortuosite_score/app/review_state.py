@@ -111,6 +111,67 @@ def _branch_ids_for_component(
     return sorted(branch_ids)
 
 
+def _node_root_distances(branches_df: pd.DataFrame) -> dict[int, float]:
+    if "root-distance-src" not in branches_df.columns or "root-distance-dst" not in branches_df.columns:
+        return {}
+
+    distances: dict[int, float] = {}
+    for _, row in branches_df.iterrows():
+        src = int(row["node-id-src"])
+        dst = int(row["node-id-dst"])
+        distances[src] = min(
+            distances.get(src, float("inf")),
+            float(row["root-distance-src"]),
+        )
+        distances[dst] = min(
+            distances.get(dst, float("inf")),
+            float(row["root-distance-dst"]),
+        )
+    return distances
+
+
+def _root_node_for_component(
+    component: set[int],
+    adjacency: dict[int, list[tuple[int, float, int]]],
+    root_distances: dict[int, float],
+) -> int:
+    if root_distances:
+        return min(component, key=lambda node_id: root_distances.get(node_id, float("inf")))
+    return max(component, key=lambda node_id: (len(adjacency[node_id]), node_id))
+
+
+def _shortest_branch_paths_from_root(
+    root_node_id: int,
+    component: set[int],
+    adjacency: dict[int, list[tuple[int, float, int]]],
+) -> dict[int, tuple[float, list[int]]]:
+    distances = {root_node_id: 0.0}
+    branch_paths: dict[int, list[int]] = {root_node_id: []}
+    visited: set[int] = set()
+
+    while len(visited) < len(component):
+        available = [node_id for node_id in component if node_id not in visited]
+        if not available:
+            break
+        current = min(available, key=lambda node_id: distances.get(node_id, float("inf")))
+        if distances.get(current, float("inf")) == float("inf"):
+            break
+        visited.add(current)
+        for neighbor, length, branch_id in adjacency[current]:
+            if neighbor not in component:
+                continue
+            candidate = distances[current] + float(length)
+            if candidate < distances.get(neighbor, float("inf")):
+                distances[neighbor] = candidate
+                branch_paths[neighbor] = branch_paths[current] + [int(branch_id)]
+
+    return {
+        node_id: (distances[node_id], branch_paths[node_id])
+        for node_id in distances
+        if node_id in branch_paths
+    }
+
+
 def build_auto_vascx_vessels(
     branches_df: pd.DataFrame,
     min_total_length: float = 25.0,
@@ -129,23 +190,47 @@ def build_auto_vascx_vessels(
             continue
 
         adjacency, _ = _build_graph(branches_df, category_branch_ids)
+        root_distances = _node_root_distances(branches_df)
         components = _connected_components(adjacency)
-        component_rows: list[tuple[float, list[int]]] = []
+        path_rows: list[tuple[float, list[int]]] = []
         for component in components:
-            branch_ids = _branch_ids_for_component(component, adjacency)
-            if not branch_ids:
+            if not component:
                 continue
-            total_length = float(
-                branches_df.loc[
-                    branches_df["branch_id"].isin(branch_ids),
-                    "branch-distance",
-                ].sum()
-            )
-            if total_length >= float(min_total_length):
-                component_rows.append((total_length, branch_ids))
+            root_node_id = _root_node_for_component(component, adjacency, root_distances)
+            paths = _shortest_branch_paths_from_root(root_node_id, component, adjacency)
+            leaves = [
+                node_id
+                for node_id in component
+                if node_id != root_node_id and len(adjacency[node_id]) <= 1
+            ]
+            if not leaves:
+                leaves = [
+                    node_id
+                    for node_id, (_, branch_ids) in paths.items()
+                    if node_id != root_node_id and branch_ids
+                ]
+            for leaf_node_id in leaves:
+                if leaf_node_id not in paths:
+                    continue
+                total_length, branch_ids = paths[leaf_node_id]
+                branch_ids = [branch_id for branch_id in branch_ids if branch_id >= 0]
+                if branch_ids and total_length >= float(min_total_length):
+                    path_rows.append((float(total_length), sorted(dict.fromkeys(branch_ids))))
 
-        component_rows.sort(reverse=True, key=lambda item: item[0])
-        for index, (_, branch_ids) in enumerate(component_rows, start=1):
+        deduplicated_path_rows: dict[tuple[int, ...], float] = {}
+        for total_length, branch_ids in path_rows:
+            path_key = tuple(branch_ids)
+            deduplicated_path_rows[path_key] = max(
+                total_length,
+                deduplicated_path_rows.get(path_key, 0.0),
+            )
+
+        sorted_paths = sorted(
+            ((length, list(branch_ids)) for branch_ids, length in deduplicated_path_rows.items()),
+            reverse=True,
+            key=lambda item: item[0],
+        )
+        for index, (_, branch_ids) in enumerate(sorted_paths, start=1):
             vessels[f"{category}_vascx_{index}"] = {
                 "category": category,
                 "branch_ids": branch_ids,
@@ -169,12 +254,109 @@ def resolve_vessel_branch_ids(
     }
 
 
+def has_branching_nodes(branches_df: pd.DataFrame, branch_ids: list[int]) -> bool:
+    adjacency, _ = _build_graph(branches_df, branch_ids)
+    return any(len(edges) > 2 for edges in adjacency.values())
+
+
 def _candidate_nodes_for_component(
     component: set[int],
     adjacency: dict[int, list[tuple[int, float, int]]],
 ) -> list[int]:
     endpoints = [node_id for node_id in component if len(adjacency[node_id]) <= 1]
     return endpoints if endpoints else list(component)
+
+
+def _branch_points(row: pd.Series) -> np.ndarray:
+    points = row.get("path_points")
+    if isinstance(points, list) and len(points) >= 2:
+        return np.array(points, dtype=float)
+    return np.array(
+        [
+            [float(row["image-coord-src-1"]), float(row["image-coord-src-0"])],
+            [float(row["image-coord-dst-1"]), float(row["image-coord-dst-0"])],
+        ],
+        dtype=float,
+    )
+
+
+def _nearest_point_on_polyline(
+    point_xy: tuple[float, float],
+    polyline: np.ndarray,
+) -> dict[str, object]:
+    point = np.array(point_xy, dtype=float)
+    best_distance = float("inf")
+    best_point = polyline[0]
+    best_distance_from_start = 0.0
+    traversed_distance = 0.0
+
+    for start, end in zip(polyline[:-1], polyline[1:]):
+        segment = end - start
+        segment_length = float(np.linalg.norm(segment))
+        if segment_length == 0:
+            continue
+        fraction = float(np.clip(np.dot(point - start, segment) / (segment_length**2), 0.0, 1.0))
+        projected = start + fraction * segment
+        distance = float(np.linalg.norm(point - projected))
+        if distance < best_distance:
+            best_distance = distance
+            best_point = projected
+            best_distance_from_start = traversed_distance + fraction * segment_length
+        traversed_distance += segment_length
+
+    return {
+        "point": [float(best_point[0]), float(best_point[1])],
+        "distance": best_distance,
+        "distance_from_start": best_distance_from_start,
+        "total_length": traversed_distance,
+    }
+
+
+def _nearest_component_target(
+    branches_df: pd.DataFrame,
+    adjacency: dict[int, list[tuple[int, float, int]]],
+    component: set[int],
+    point_xy: tuple[float, float],
+) -> dict[str, object] | None:
+    component_branch_ids = _branch_ids_for_component(component, adjacency)
+    branch_rows = branches_df.set_index("branch_id", drop=False)
+    best_target: dict[str, object] | None = None
+
+    for branch_id in component_branch_ids:
+        if branch_id not in branch_rows.index:
+            continue
+        row = branch_rows.loc[branch_id]
+        polyline = _branch_points(row)
+        if len(polyline) < 2:
+            continue
+        nearest = _nearest_point_on_polyline(point_xy, polyline)
+        distance_to_src = float(nearest["distance_from_start"])
+        distance_to_dst = float(nearest["total_length"]) - distance_to_src
+        if distance_to_src <= distance_to_dst:
+            graph_node_id = int(row["node-id-src"])
+            graph_extra_distance = distance_to_src
+        else:
+            graph_node_id = int(row["node-id-dst"])
+            graph_extra_distance = distance_to_dst
+        visual_distance = float(nearest["distance"])
+        graph_distance = visual_distance + graph_extra_distance
+        candidate = {
+            "branch_id": int(branch_id),
+            "graph_node_id": graph_node_id,
+            "point": nearest["point"],
+            "visual_distance": visual_distance,
+            "graph_distance": graph_distance,
+        }
+        if best_target is None or (
+            visual_distance,
+            graph_distance,
+        ) < (
+            float(best_target["visual_distance"]),
+            float(best_target["graph_distance"]),
+        ):
+            best_target = candidate
+
+    return best_target
 
 
 def synthesize_missing_links(
@@ -216,8 +398,7 @@ def synthesize_missing_links(
 
     while len(working_components) > 1:
         best_pair: tuple[int, int] | None = None
-        best_nodes: tuple[int, int] | None = None
-        best_distance: float | None = None
+        best_link: dict[str, object] | None = None
 
         for idx, component_a in enumerate(working_components):
             candidates_a = _candidate_nodes_for_component(component_a, adjacency)
@@ -225,15 +406,58 @@ def synthesize_missing_links(
                 candidates_b = _candidate_nodes_for_component(component_b, adjacency)
                 for node_a in candidates_a:
                     ax, ay = node_positions[node_a]
-                    for node_b in candidates_b:
-                        bx, by = node_positions[node_b]
-                        distance = float(np.hypot(ax - bx, ay - by))
-                        if best_distance is None or distance < best_distance:
-                            best_distance = distance
+                    target = _nearest_component_target(
+                        branches_df,
+                        adjacency,
+                        component_b,
+                        (ax, ay),
+                    )
+                    if target is not None:
+                        candidate = {
+                            "src_node_id": int(node_a),
+                            "dst_node_id": int(target["graph_node_id"]),
+                            "points": [[float(ax), float(ay)], target["point"]],
+                            "length": float(target["graph_distance"]),
+                            "display_length": float(target["visual_distance"]),
+                            "target_branch_id": int(target["branch_id"]),
+                        }
+                        if best_link is None or (
+                            float(candidate["display_length"]),
+                            float(candidate["length"]),
+                        ) < (
+                            float(best_link["display_length"]),
+                            float(best_link["length"]),
+                        ):
                             best_pair = (idx, jdx)
-                            best_nodes = (node_a, node_b)
+                            best_link = candidate
+                for node_b in candidates_b:
+                    bx, by = node_positions[node_b]
+                    target = _nearest_component_target(
+                        branches_df,
+                        adjacency,
+                        component_a,
+                        (bx, by),
+                    )
+                    if target is not None:
+                        candidate = {
+                            "src_node_id": int(node_b),
+                            "dst_node_id": int(target["graph_node_id"]),
+                            "points": [[float(bx), float(by)], target["point"]],
+                            "length": float(target["graph_distance"]),
+                            "display_length": float(target["visual_distance"]),
+                            "target_branch_id": int(target["branch_id"]),
+                        }
+                        if best_link is None or (
+                            float(candidate["display_length"]),
+                            float(candidate["length"]),
+                        ) < (
+                            float(best_link["display_length"]),
+                            float(best_link["length"]),
+                        ):
+                            best_pair = (idx, jdx)
+                            best_link = candidate
 
-        if best_pair is None or best_nodes is None or best_distance is None:
+        if best_pair is None or best_link is None:
             return {
                 "branch_ids": selected_branch_ids,
                 "synthetic_links": synthetic_links,
@@ -242,22 +466,12 @@ def synthesize_missing_links(
                 "bridge_success": False,
             }
 
-        src_node_id, dst_node_id = best_nodes
-        src_x, src_y = node_positions[src_node_id]
-        dst_x, dst_y = node_positions[dst_node_id]
-        synthetic_links.append(
-            {
-                "src_node_id": int(src_node_id),
-                "dst_node_id": int(dst_node_id),
-                "points": [
-                    [float(src_x), float(src_y)],
-                    [float(dst_x), float(dst_y)],
-                ],
-                "length": float(best_distance),
-            }
-        )
-        adjacency.setdefault(src_node_id, []).append((dst_node_id, float(best_distance), -1))
-        adjacency.setdefault(dst_node_id, []).append((src_node_id, float(best_distance), -1))
+        synthetic_links.append(best_link)
+        src_node_id = int(best_link["src_node_id"])
+        dst_node_id = int(best_link["dst_node_id"])
+        link_length = float(best_link["length"])
+        adjacency.setdefault(src_node_id, []).append((dst_node_id, link_length, -1))
+        adjacency.setdefault(dst_node_id, []).append((src_node_id, link_length, -1))
 
         idx, jdx = best_pair
         merged = working_components[idx] | working_components[jdx]
@@ -316,8 +530,10 @@ def score_vessel(
         adjacency.setdefault(dst_node_id, []).append((src_node_id, length, synthetic_edge_id))
         src_x, src_y = link["points"][0]
         dst_x, dst_y = link["points"][1]
-        node_positions[src_node_id] = (float(src_x), float(src_y))
-        node_positions[dst_node_id] = (float(dst_x), float(dst_y))
+        if src_node_id not in node_positions:
+            node_positions[src_node_id] = (float(src_x), float(src_y))
+        if dst_node_id not in node_positions:
+            node_positions[dst_node_id] = (float(dst_x), float(dst_y))
 
     components = _connected_components(adjacency)
     component_branch_lengths: list[tuple[set[int], float]] = []

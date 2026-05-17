@@ -1,0 +1,28 @@
+{
+
+    "model_params":
+    {
+        "net" : "prompt_effi_b3_p_unet_dcp",
+        "n_class": 1,
+
+        "local_window_sizes": [64, 32, 16, 8, 4],
+        "cha_promot_channels": [6, 3, 10, 30, 96],
+        "pos_promot_channels": [64, 32, 16, 8, 4],
+        "att_fusion": "add",
+        "embed_ratio": 1,
+        "strides": [8, 4, 2, 1, 1],
+        "use_conv": true,
+
+        "size_h": 1024,
+        "size_w": 1024
+    },
+    
+    "modality_mapping":
+    {
+        "CFP": 0,
+        "SLO": 1, 
+        "UWF": 2,
+        "OCTA": 3,
+        "FFA": 4
+    }
+}
