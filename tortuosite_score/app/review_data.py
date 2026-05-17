@@ -5,6 +5,7 @@ import io
 import json
 import shutil
 from contextlib import redirect_stdout
+from collections import defaultdict, deque
 from pathlib import Path
 
 import cv2
@@ -16,6 +17,25 @@ from skan import Skeleton
 from tortuosite_score.app.constants import RUNS_ROOT
 from tortuosite_score.vessels_detection.analyse import skeletonize_mask
 from tortuosite_score.vessels_detection.main import run_pipeline
+
+
+def _path_endpoint_signature(points: list[list[int]]) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    if len(points) < 2:
+        return None
+    start = tuple(int(value) for value in points[0])
+    end = tuple(int(value) for value in points[-1])
+    return tuple(sorted((start, end)))
+
+
+def _row_endpoint_signature(row: pd.Series) -> tuple[tuple[int, int], tuple[int, int]]:
+    return tuple(
+        sorted(
+            (
+                (int(row["image-coord-src-1"]), int(row["image-coord-src-0"])),
+                (int(row["image-coord-dst-1"]), int(row["image-coord-dst-0"])),
+            )
+        )
+    )
 
 
 def slugify_name(filename: str) -> str:
@@ -110,11 +130,35 @@ def load_review_bundle(run_dir_str: str) -> dict:
             branches_df["image-coord-dst-0"].astype(float) - disc_y,
         )
 
-    paths_payload: list[dict] = []
-    for branch_id in range(branch_count):
-        coords = skeleton_graph.path_coordinates(branch_id)
+    path_points_by_signature: dict[
+        tuple[tuple[int, int], tuple[int, int]],
+        deque[list[list[int]]],
+    ] = defaultdict(deque)
+    for path_index in range(skeleton_graph.n_paths):
+        coords = skeleton_graph.path_coordinates(path_index)
         if coords.shape[0] < 2:
             continue
+        path_points = [[int(col), int(row)] for row, col in coords]
+        signature = _path_endpoint_signature(path_points)
+        if signature is None:
+            continue
+        path_points_by_signature[signature].append(path_points)
+
+    paths_payload: list[dict] = []
+    for branch_id in range(branch_count):
+        row = branches_df.loc[branch_id]
+        signature = _row_endpoint_signature(row)
+        matched_points = (
+            path_points_by_signature[signature].popleft()
+            if path_points_by_signature.get(signature)
+            else None
+        )
+        if matched_points is None:
+            matched_points = [
+                [int(row["image-coord-src-1"]), int(row["image-coord-src-0"])],
+                [int(row["image-coord-dst-1"]), int(row["image-coord-dst-0"])],
+            ]
+        coords = np.array([[point[1], point[0]] for point in matched_points], dtype=int)
         if cleaned_artery is not None and cleaned_vein is not None:
             rows = coords[:, 0].astype(int)
             cols = coords[:, 1].astype(int)
@@ -129,12 +173,11 @@ def load_review_bundle(run_dir_str: str) -> dict:
             elif artery_pixels + vein_pixels > 0:
                 branches_df.loc[branch_id, "vascx_category"] = "mixed"
         centroid = coords.mean(axis=0)
-        path_points = [[int(col), int(row)] for row, col in coords]
-        branches_df.at[branch_id, "path_points"] = path_points
+        branches_df.at[branch_id, "path_points"] = matched_points
         paths_payload.append(
             {
                 "branchId": int(branch_id),
-                "points": path_points,
+                "points": matched_points,
                 "label": [int(round(centroid[1])), int(round(centroid[0]))],
             }
         )

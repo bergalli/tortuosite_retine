@@ -325,11 +325,9 @@ def _render_manual_review(selected_run_name: str) -> None:
         base_opacity = st.slider("Base image opacity", 0.0, 1.0, 0.95, 0.05)
     allow_reuse_assigned = True
 
+    selected_branch_ids = sorted(int(branch_id) for branch_id in review_state["selected_branch_ids"])
     st.subheader("Interactive skeleton viewer")
-    provisional_resolution = synthesize_missing_links(
-        branches_df,
-        sorted(int(branch_id) for branch_id in review_state["selected_branch_ids"]),
-    )
+    provisional_resolution = synthesize_missing_links(branches_df, selected_branch_ids)
     viewer_branches = build_viewer_branches(
         branches_df=branches_df,
         paths_payload=bundle["paths_payload"],
@@ -371,7 +369,6 @@ def _render_manual_review(selected_run_name: str) -> None:
         review_state=review_state,
     )
 
-    selected_branch_ids = sorted(int(branch_id) for branch_id in review_state["selected_branch_ids"])
     selected_complete_vessels = _selected_complete_vessel_names(review_state, selected_branch_ids)
     node_options = build_node_options(branches_df, selected_branch_ids)
     node_ids = [int(option["node_id"]) for option in node_options]

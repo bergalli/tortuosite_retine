@@ -292,6 +292,12 @@ def _candidate_nodes_for_component(
     return endpoints if endpoints else list(component)
 
 
+def _euclidean_distance(
+    point_a: tuple[float, float],
+    point_b: tuple[float, float],
+) -> float:
+    return float(np.linalg.norm(np.array(point_a, dtype=float) - np.array(point_b, dtype=float)))
+
 def _branch_points(row: pd.Series) -> np.ndarray:
     points = row.get("path_points")
     if isinstance(points, list) and len(points) >= 2:
