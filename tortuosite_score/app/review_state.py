@@ -10,22 +10,35 @@ import streamlit as st
 from tortuosite_score.app.review_data import read_json
 
 
-def get_or_create_review_state(run_dir: Path) -> dict:
+def get_or_create_review_state(
+    run_dir: Path,
+    branches_df: pd.DataFrame | None = None,
+    auto_create_vessels: bool = False,
+    auto_min_vessel_length: float = 25.0,
+) -> dict:
     state_key = f"review_state::{run_dir.name}"
     if state_key not in st.session_state:
         saved_path = run_dir / "manual_review_state.json"
         state = read_json(saved_path) if saved_path.exists() else {}
+        vessels = {
+            vessel_name: {
+                "category": vessel.get("category", "artere"),
+                "branch_ids": vessel.get("branch_ids", []),
+                "synthetic_links": vessel.get("synthetic_links", []),
+            }
+            for vessel_name, vessel in state.get("vessels", {}).items()
+        }
+        if not vessels and auto_create_vessels and branches_df is not None:
+            vessels = build_auto_vascx_vessels(
+                branches_df,
+                min_total_length=auto_min_vessel_length,
+            )
         st.session_state[state_key] = {
             "selected_branch_ids": [],
-            "vessels": {
-                vessel_name: {
-                    "category": vessel.get("category", "artere"),
-                    "branch_ids": vessel.get("branch_ids", []),
-                    "synthetic_links": vessel.get("synthetic_links", []),
-                }
-                for vessel_name, vessel in state.get("vessels", {}).items()
-            },
+            "vessels": vessels,
         }
+        if vessels and not saved_path.exists():
+            persist_manual_review(run_dir, st.session_state[state_key], branches_df)
     return st.session_state[state_key]
 
 
@@ -84,6 +97,62 @@ def _connected_components(adjacency: dict[int, list[tuple[int, float, int]]]) ->
                     queue.append(neighbor)
         components.append(component)
     return components
+
+
+def _branch_ids_for_component(
+    component: set[int],
+    adjacency: dict[int, list[tuple[int, float, int]]],
+) -> list[int]:
+    branch_ids = set()
+    for node_id in component:
+        for neighbor, _, branch_id in adjacency[node_id]:
+            if neighbor in component and branch_id >= 0:
+                branch_ids.add(int(branch_id))
+    return sorted(branch_ids)
+
+
+def build_auto_vascx_vessels(
+    branches_df: pd.DataFrame,
+    min_total_length: float = 25.0,
+) -> dict[str, dict]:
+    if "vascx_category" not in branches_df.columns:
+        return {}
+
+    vessels: dict[str, dict] = {}
+    for category in ["artere", "veine"]:
+        category_branch_ids = (
+            branches_df.loc[branches_df["vascx_category"] == category, "branch_id"]
+            .astype(int)
+            .tolist()
+        )
+        if not category_branch_ids:
+            continue
+
+        adjacency, _ = _build_graph(branches_df, category_branch_ids)
+        components = _connected_components(adjacency)
+        component_rows: list[tuple[float, list[int]]] = []
+        for component in components:
+            branch_ids = _branch_ids_for_component(component, adjacency)
+            if not branch_ids:
+                continue
+            total_length = float(
+                branches_df.loc[
+                    branches_df["branch_id"].isin(branch_ids),
+                    "branch-distance",
+                ].sum()
+            )
+            if total_length >= float(min_total_length):
+                component_rows.append((total_length, branch_ids))
+
+        component_rows.sort(reverse=True, key=lambda item: item[0])
+        for index, (_, branch_ids) in enumerate(component_rows, start=1):
+            vessels[f"{category}_vascx_{index}"] = {
+                "category": category,
+                "branch_ids": branch_ids,
+                "synthetic_links": [],
+            }
+
+    return vessels
 
 
 def resolve_vessel_branch_ids(
@@ -375,21 +444,23 @@ def build_selection_table(branches_df: pd.DataFrame, selected_branch_ids: list[i
     selection_df = branches_df[branches_df["branch_id"].isin(selected_branch_ids)].copy()
     if selection_df.empty:
         return selection_df
-    return selection_df[
-        [
-            "branch_id",
-            "branch-distance",
-            "euclidean-distance",
-            "tortuosity",
-            "branch-type",
-        ]
-    ].rename(
+    columns = [
+        "branch_id",
+        "branch-distance",
+        "euclidean-distance",
+        "tortuosity",
+        "branch-type",
+    ]
+    if "vascx_category" in selection_df.columns:
+        columns.append("vascx_category")
+    return selection_df[columns].rename(
         columns={
             "branch_id": "Branch ID",
             "branch-distance": "Length",
             "euclidean-distance": "Chord",
             "tortuosity": "Tortuosity",
             "branch-type": "Type",
+            "vascx_category": "VascX label",
         }
     )
 

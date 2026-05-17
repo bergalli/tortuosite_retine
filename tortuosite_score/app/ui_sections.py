@@ -45,6 +45,54 @@ def render_sidebar_run_setup() -> dict:
                 index=0,
                 disabled=deep_backend == "VascX",
             )
+            if deep_backend == "VascX":
+                vascx_av_size = st.select_slider(
+                    "VascX artery/vein input size",
+                    options=[512, 768, 1024, 1280],
+                    value=1024,
+                    help="Larger values can preserve finer vessels but take more memory and time.",
+                )
+                vascx_use_contrast_enhancement = st.toggle(
+                    "VascX contrast enhancement",
+                    value=True,
+                    help="Use VascX fundus contrast enhancement before inference.",
+                )
+                vascx_min_object_size = st.slider(
+                    "VascX cleanup min object size",
+                    0,
+                    100,
+                    12,
+                    1,
+                    help="Remove smaller connected components after artery/vein segmentation.",
+                )
+                vascx_closing_radius = st.slider(
+                    "VascX cleanup closing radius",
+                    0,
+                    4,
+                    1,
+                    1,
+                    help="Connect tiny gaps after artery/vein segmentation.",
+                )
+                vascx_auto_create_vessels = st.toggle(
+                    "Create VascX vessels",
+                    value=True,
+                    help="Initialize editable saved vessels from connected artery/vein skeleton groups.",
+                )
+                vascx_auto_min_vessel_length = st.slider(
+                    "Auto vessel min length",
+                    0.0,
+                    250.0,
+                    25.0,
+                    5.0,
+                    help="Ignore shorter auto-created vessel fragments.",
+                )
+            else:
+                vascx_av_size = 1024
+                vascx_use_contrast_enhancement = True
+                vascx_min_object_size = 12
+                vascx_closing_radius = 1
+                vascx_auto_create_vessels = False
+                vascx_auto_min_vessel_length = 25.0
             vessel_percentile = 95.0
             vessel_low_percentile = 90.0
         else:
@@ -53,6 +101,12 @@ def render_sidebar_run_setup() -> dict:
             deep_threshold = 0.30
             deep_modality = "CFP"
             deep_backend = "DCP"
+            vascx_av_size = 1024
+            vascx_use_contrast_enhancement = True
+            vascx_min_object_size = 12
+            vascx_closing_radius = 1
+            vascx_auto_create_vessels = False
+            vascx_auto_min_vessel_length = 25.0
 
         run_btn = st.button(
             "Run segmentation",
@@ -69,6 +123,12 @@ def render_sidebar_run_setup() -> dict:
         "deep_threshold": deep_threshold,
         "deep_modality": deep_modality,
         "deep_backend": deep_backend,
+        "vascx_av_size": vascx_av_size,
+        "vascx_use_contrast_enhancement": vascx_use_contrast_enhancement,
+        "vascx_min_object_size": vascx_min_object_size,
+        "vascx_closing_radius": vascx_closing_radius,
+        "vascx_auto_create_vessels": vascx_auto_create_vessels,
+        "vascx_auto_min_vessel_length": vascx_auto_min_vessel_length,
         "run_btn": run_btn,
     }
 

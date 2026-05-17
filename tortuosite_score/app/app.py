@@ -48,6 +48,12 @@ def _handle_run_creation(sidebar_values: dict) -> None:
         deep_threshold=sidebar_values["deep_threshold"],
         deep_modality=sidebar_values["deep_modality"],
         deep_backend=sidebar_values["deep_backend"],
+        vascx_av_size=sidebar_values["vascx_av_size"],
+        vascx_use_contrast_enhancement=sidebar_values["vascx_use_contrast_enhancement"],
+        vascx_min_object_size=sidebar_values["vascx_min_object_size"],
+        vascx_closing_radius=sidebar_values["vascx_closing_radius"],
+        vascx_auto_create_vessels=sidebar_values["vascx_auto_create_vessels"],
+        vascx_auto_min_vessel_length=sidebar_values["vascx_auto_min_vessel_length"],
     )
     st.session_state["active_run_id"] = run_id
     st.rerun()
@@ -97,20 +103,35 @@ def _sync_viewer_selection(
 def _render_manual_review(selected_run_name: str) -> None:
     selected_run_dir = RUNS_ROOT / selected_run_name
     bundle = load_review_bundle(str(selected_run_dir))
-    review_state = get_or_create_review_state(selected_run_dir)
     branches_df = pd.DataFrame(bundle["branches_df"])
+    review_state = get_or_create_review_state(
+        selected_run_dir,
+        branches_df=branches_df,
+        auto_create_vessels=bool(bundle["metadata"].get("vascx_auto_create_vessels", False)),
+        auto_min_vessel_length=float(bundle["metadata"].get("vascx_auto_min_vessel_length", 25.0)),
+    )
 
     vessel_name_key = f"vessel_name_input::{selected_run_name}"
+    vessel_category_key = f"vessel_category_input::{selected_run_name}"
     vessel_load_key = f"saved_vessel_select::{selected_run_name}"
     vessel_name_reset_key = f"vessel_name_reset::{selected_run_name}"
     viewer_reset_key = f"viewer_reset_nonce::{selected_run_name}"
+    pending_edit_key = f"pending_vessel_edit::{selected_run_name}"
     if st.session_state.get(vessel_name_reset_key):
         st.session_state[vessel_name_key] = ""
         st.session_state[vessel_name_reset_key] = False
     if vessel_name_key not in st.session_state:
         st.session_state[vessel_name_key] = ""
+    if vessel_category_key not in st.session_state:
+        st.session_state[vessel_category_key] = "artere"
     if viewer_reset_key not in st.session_state:
         st.session_state[viewer_reset_key] = 0
+    pending_vessel_edit = st.session_state.pop(pending_edit_key, None)
+    if pending_vessel_edit in review_state["vessels"]:
+        vessel = review_state["vessels"][pending_vessel_edit]
+        review_state["selected_branch_ids"] = list(vessel["branch_ids"])
+        st.session_state[vessel_name_key] = pending_vessel_edit
+        st.session_state[vessel_category_key] = vessel["category"]
 
     with st.sidebar:
         st.header("Viewer")
@@ -183,6 +204,7 @@ def _render_manual_review(selected_run_name: str) -> None:
             "Vessel category",
             options=["artere", "veine"],
             horizontal=True,
+            key=vessel_category_key,
         )
         vessel_name = st.text_input("Vessel name", key=vessel_name_key)
         st.caption(
@@ -241,12 +263,20 @@ def _render_manual_review(selected_run_name: str) -> None:
                 options=vessel_names,
                 key=vessel_load_key,
             )
-            load_col, delete_col = st.columns(2)
+            load_col, add_col, delete_col = st.columns(3)
             with load_col:
-                if st.button("Load vessel selection", use_container_width=True):
-                    review_state["selected_branch_ids"] = list(
-                        review_state["vessels"][vessel_to_load]["branch_ids"]
+                if st.button("Edit vessel", use_container_width=True):
+                    st.session_state[pending_edit_key] = vessel_to_load
+                    st.session_state[viewer_reset_key] += 1
+                    st.rerun()
+            with add_col:
+                if st.button("Add to selection", use_container_width=True):
+                    current = set(int(branch_id) for branch_id in review_state["selected_branch_ids"])
+                    current.update(
+                        int(branch_id)
+                        for branch_id in review_state["vessels"][vessel_to_load]["branch_ids"]
                     )
+                    review_state["selected_branch_ids"] = sorted(current)
                     st.session_state[viewer_reset_key] += 1
                     st.rerun()
             with delete_col:

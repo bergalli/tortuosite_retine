@@ -16,8 +16,8 @@ from tortuosite_score.vessels_detection.deep_model import _normalize_rgb_uint8
 AV_MODEL_ID = "Eyened/vascx:artery_vein/av_july24.pt"
 DISC_MODEL_ID = "Eyened/vascx:disc/disc_july24.pt"
 
-_AV_MODEL = None
-_DISC_MODEL = None
+_AV_MODELS = {}
+_DISC_MODELS = {}
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,7 @@ def _select_device() -> tuple[str, bool]:
     return "cpu", False
 
 
-def _load_segmentation_model(model_id: str, size: int):
+def _load_segmentation_model(model_id: str, size: int, use_contrast_enhancement: bool):
     try:
         from vascx_simplify import EnsembleSegmentation, VASCXTransform, from_huggingface
     except Exception as exc:
@@ -54,22 +54,35 @@ def _load_segmentation_model(model_id: str, size: int):
 
     device, use_fp16 = _select_device()
     model_path = from_huggingface(model_id)
-    transform = VASCXTransform(size=size, use_fp16=use_fp16, device=device)
+    transform = VASCXTransform(
+        size=size,
+        use_ce=use_contrast_enhancement,
+        use_fp16=use_fp16,
+        device=device,
+    )
     return EnsembleSegmentation(model_path, transform, device=device)
 
 
-def _get_av_model():
-    global _AV_MODEL
-    if _AV_MODEL is None:
-        _AV_MODEL = _load_segmentation_model(AV_MODEL_ID, size=1024)
-    return _AV_MODEL
+def _get_av_model(size: int, use_contrast_enhancement: bool):
+    key = (int(size), bool(use_contrast_enhancement))
+    if key not in _AV_MODELS:
+        _AV_MODELS[key] = _load_segmentation_model(
+            AV_MODEL_ID,
+            size=int(size),
+            use_contrast_enhancement=bool(use_contrast_enhancement),
+        )
+    return _AV_MODELS[key]
 
 
-def _get_disc_model():
-    global _DISC_MODEL
-    if _DISC_MODEL is None:
-        _DISC_MODEL = _load_segmentation_model(DISC_MODEL_ID, size=512)
-    return _DISC_MODEL
+def _get_disc_model(use_contrast_enhancement: bool):
+    key = bool(use_contrast_enhancement)
+    if key not in _DISC_MODELS:
+        _DISC_MODELS[key] = _load_segmentation_model(
+            DISC_MODEL_ID,
+            size=512,
+            use_contrast_enhancement=key,
+        )
+    return _DISC_MODELS[key]
 
 
 def _prediction_to_classes(prediction, shape: tuple[int, int]) -> np.ndarray:
@@ -91,7 +104,12 @@ def _prediction_to_classes(prediction, shape: tuple[int, int]) -> np.ndarray:
     return classes.astype(np.uint8)
 
 
-def predict_vascx(image_rgb: np.ndarray, mask: np.ndarray | None = None) -> VascXPrediction:
+def predict_vascx(
+    image_rgb: np.ndarray,
+    mask: np.ndarray | None = None,
+    av_size: int = 1024,
+    use_contrast_enhancement: bool = True,
+) -> VascXPrediction:
     """
     Run VascX artery/vein and optic disc segmentation.
 
@@ -105,8 +123,14 @@ def predict_vascx(image_rgb: np.ndarray, mask: np.ndarray | None = None) -> Vasc
     image_pil = Image.fromarray(image_rgb)
     shape = image_rgb.shape[:2]
 
-    av_classes = _prediction_to_classes(_get_av_model().predict(image_pil), shape)
-    disc_classes = _prediction_to_classes(_get_disc_model().predict(image_pil), shape)
+    av_classes = _prediction_to_classes(
+        _get_av_model(av_size, use_contrast_enhancement).predict(image_pil),
+        shape,
+    )
+    disc_classes = _prediction_to_classes(
+        _get_disc_model(use_contrast_enhancement).predict(image_pil),
+        shape,
+    )
 
     vessel_mask = av_classes > 0
     artery_mask = (av_classes == 1) | (av_classes == 3)

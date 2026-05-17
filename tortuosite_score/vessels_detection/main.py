@@ -228,6 +228,10 @@ def run_pipeline(
     deep_threshold: float = 0.30,
     deep_modality: str = "CFP",
     deep_backend: str = "DCP",
+    vascx_av_size: int = 1024,
+    vascx_use_contrast_enhancement: bool = True,
+    vascx_min_object_size: int = 12,
+    vascx_closing_radius: int = 1,
 ):
     image_path = Path(image_path)
     output_csv = Path(output_csv)
@@ -281,7 +285,19 @@ def run_pipeline(
             )
         elif normalized_backend == "VASCX":
             print("Méthode utilisée : deep learning VascX")
-            vascx_prediction = predict_vascx(image, mask=fundus_mask)
+            print(
+                "[VascX] paramètres "
+                f"av_size={vascx_av_size} "
+                f"use_contrast_enhancement={vascx_use_contrast_enhancement} "
+                f"min_object_size={vascx_min_object_size} "
+                f"closing_radius={vascx_closing_radius}"
+            )
+            vascx_prediction = predict_vascx(
+                image,
+                mask=fundus_mask,
+                av_size=vascx_av_size,
+                use_contrast_enhancement=vascx_use_contrast_enhancement,
+            )
 
             binary = vascx_prediction.vessel_mask
             artery_binary = vascx_prediction.artery_mask
@@ -362,8 +378,18 @@ def run_pipeline(
 
     # 5. Nettoyage
     if artery_binary is not None and vein_binary is not None:
-        cleaned_artery = clean_binary_mask(artery_binary, mask=fundus_mask)
-        cleaned_vein = clean_binary_mask(vein_binary, mask=fundus_mask)
+        cleaned_artery = clean_binary_mask(
+            artery_binary,
+            mask=fundus_mask,
+            min_object_size=vascx_min_object_size,
+            closing_radius=vascx_closing_radius,
+        )
+        cleaned_vein = clean_binary_mask(
+            vein_binary,
+            mask=fundus_mask,
+            min_object_size=vascx_min_object_size,
+            closing_radius=vascx_closing_radius,
+        )
         save_intermediate_image(
             cleaned_artery,
             intermediate_dir / "06_cleaned_artery_mask.png",
@@ -490,6 +516,30 @@ def parse_args():
         default="DCP",
         help="Backend deep learning : DCP historique ou VascX.",
     )
+    parser.add_argument(
+        "--vascx-av-size",
+        type=int,
+        choices=[512, 768, 1024, 1280],
+        default=1024,
+        help="Taille d'entrée VascX pour la segmentation artère/veine.",
+    )
+    parser.add_argument(
+        "--no-vascx-contrast-enhancement",
+        action="store_true",
+        help="Désactive le rehaussement de contraste interne VascX.",
+    )
+    parser.add_argument(
+        "--vascx-min-object-size",
+        type=int,
+        default=12,
+        help="Taille minimale des objets gardés après segmentation VascX.",
+    )
+    parser.add_argument(
+        "--vascx-closing-radius",
+        type=int,
+        default=1,
+        help="Rayon de fermeture morphologique après segmentation VascX.",
+    )
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -505,4 +555,8 @@ if __name__ == "__main__":
         deep_threshold=args.deep_threshold,
         deep_modality=args.deep_modality,
         deep_backend=args.deep_backend,
+        vascx_av_size=args.vascx_av_size,
+        vascx_use_contrast_enhancement=not args.no_vascx_contrast_enhancement,
+        vascx_min_object_size=args.vascx_min_object_size,
+        vascx_closing_radius=args.vascx_closing_radius,
     )

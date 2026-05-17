@@ -84,14 +84,30 @@ def load_review_bundle(run_dir_str: str) -> dict:
     summary_path = output_dir / "08_full_skeleton_summary.csv"
     branches_df = pd.read_csv(summary_path).copy()
     branch_count = min(len(branches_df), skeleton_graph.n_paths)
-    branches_df = branches_df.iloc[:branch_count].copy()
+    branches_df = branches_df.iloc[:branch_count].copy().reset_index(drop=True)
     branches_df["branch_id"] = np.arange(branch_count, dtype=int)
+    branches_df["vascx_category"] = "unknown"
+    branches_df["vascx_artery_pixels"] = 0
+    branches_df["vascx_vein_pixels"] = 0
 
     paths_payload: list[dict] = []
     for branch_id in range(branch_count):
         coords = skeleton_graph.path_coordinates(branch_id)
         if coords.shape[0] < 2:
             continue
+        if cleaned_artery is not None and cleaned_vein is not None:
+            rows = coords[:, 0].astype(int)
+            cols = coords[:, 1].astype(int)
+            artery_pixels = int(np.count_nonzero(cleaned_artery[rows, cols] > 0))
+            vein_pixels = int(np.count_nonzero(cleaned_vein[rows, cols] > 0))
+            branches_df.loc[branch_id, "vascx_artery_pixels"] = artery_pixels
+            branches_df.loc[branch_id, "vascx_vein_pixels"] = vein_pixels
+            if artery_pixels > vein_pixels * 1.25:
+                branches_df.loc[branch_id, "vascx_category"] = "artere"
+            elif vein_pixels > artery_pixels * 1.25:
+                branches_df.loc[branch_id, "vascx_category"] = "veine"
+            elif artery_pixels + vein_pixels > 0:
+                branches_df.loc[branch_id, "vascx_category"] = "mixed"
         centroid = coords.mean(axis=0)
         paths_payload.append(
             {
@@ -127,6 +143,12 @@ def run_uploaded_analysis(
     deep_threshold: float,
     deep_modality: str,
     deep_backend: str,
+    vascx_av_size: int,
+    vascx_use_contrast_enhancement: bool,
+    vascx_min_object_size: int,
+    vascx_closing_radius: int,
+    vascx_auto_create_vessels: bool,
+    vascx_auto_min_vessel_length: float,
 ) -> str:
     run_id = slugify_name(uploaded_file.name)
     run_dir = RUNS_ROOT / run_id
@@ -165,6 +187,10 @@ def run_uploaded_analysis(
                 deep_threshold=float(deep_threshold),
                 deep_modality=deep_modality,
                 deep_backend=deep_backend,
+                vascx_av_size=int(vascx_av_size),
+                vascx_use_contrast_enhancement=bool(vascx_use_contrast_enhancement),
+                vascx_min_object_size=int(vascx_min_object_size),
+                vascx_closing_radius=int(vascx_closing_radius),
             )
 
     metadata = {
@@ -176,6 +202,12 @@ def run_uploaded_analysis(
         "deep_threshold": float(deep_threshold),
         "deep_modality": deep_modality,
         "deep_backend": deep_backend,
+        "vascx_av_size": int(vascx_av_size),
+        "vascx_use_contrast_enhancement": bool(vascx_use_contrast_enhancement),
+        "vascx_min_object_size": int(vascx_min_object_size),
+        "vascx_closing_radius": int(vascx_closing_radius),
+        "vascx_auto_create_vessels": bool(vascx_auto_create_vessels),
+        "vascx_auto_min_vessel_length": float(vascx_auto_min_vessel_length),
     }
     (run_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=True, indent=2),
