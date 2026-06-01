@@ -9,14 +9,20 @@ from tortuosite_score.app.constants import (
     SELECTED_COLOR,
     VEINE_COLOR,
 )
+from tortuosite_score.app.review_state import (
+    get_segment_geometry,
+    segment_ref_sort_key,
+    segment_refs_for_vessel,
+)
 
 
-def _vascx_branch_color(branch_row: pd.Series) -> str:
-    category = branch_row.get("vascx_category", "unknown")
-    if category == "artere":
+def _segment_color(label: str) -> str:
+    if label == "artere":
         return ARTERE_COLOR
-    if category == "veine":
+    if label == "veine":
         return VEINE_COLOR
+    if label == "manual":
+        return "#ffd166"
     return DEFAULT_BRANCH_COLOR
 
 
@@ -44,6 +50,7 @@ BRANCH_VIEWER = st.components.v2.component(
       display: block;
       background: #050505;
       cursor: crosshair;
+      touch-action: none;
     }
     """,
     js="""
@@ -51,9 +58,13 @@ BRANCH_VIEWER = st.components.v2.component(
       const { parentElement, data, setStateValue } = component;
       const svg = parentElement.querySelector("#branch-viewer");
       const svgNs = "http://www.w3.org/2000/svg";
-      let currentSelection = Array.isArray(data.selectedBranchIds)
-        ? [...data.selectedBranchIds]
+      let currentSelection = Array.isArray(data.selectedSegmentRefs)
+        ? [...data.selectedSegmentRefs]
         : [];
+      let currentStroke = [];
+      let isDrawing = false;
+      const interactionMode = data.interactionMode ?? "select";
+      const selectedColor = "#00c2a8";
 
       function make(tag, attrs = {}) {
         const node = document.createElementNS(svgNs, tag);
@@ -69,152 +80,233 @@ BRANCH_VIEWER = st.components.v2.component(
         }
       }
 
-      function toggleBranch(branchId) {
-        const next = new Set(currentSelection);
-        if (next.has(branchId)) {
-          next.delete(branchId);
-        } else {
-          next.add(branchId);
-        }
-        currentSelection = Array.from(next).sort((a, b) => a - b);
-        setStateValue("selected_branch_ids", currentSelection);
+      function pointsAttr(points) {
+        return (points ?? []).map((point) => `${point[0]},${point[1]}`).join(" ");
       }
 
-      function toggleVessel(branch) {
-        const targetBranchIds = Array.isArray(branch.vesselBranchIds) && branch.vesselBranchIds.length > 0
-          ? branch.vesselBranchIds
-          : [branch.branchId];
+      function toggleSegment(segmentRef) {
         const next = new Set(currentSelection);
-        const isSelected = targetBranchIds.every((branchId) => next.has(branchId));
-        targetBranchIds.forEach((branchId) => {
-          if (isSelected) {
-            next.delete(branchId);
+        if (next.has(segmentRef)) {
+          next.delete(segmentRef);
+        } else {
+          next.add(segmentRef);
+        }
+        currentSelection = Array.from(next).sort();
+        render();
+        setStateValue("selected_segment_refs", currentSelection);
+      }
+
+      function toggleVessel(segment) {
+        const targetRefs = Array.isArray(segment.vesselSegmentRefs) && segment.vesselSegmentRefs.length > 0
+          ? segment.vesselSegmentRefs
+          : [segment.segmentRef];
+        const next = new Set(currentSelection);
+        const fullySelected = targetRefs.every((segmentRef) => next.has(segmentRef));
+        targetRefs.forEach((segmentRef) => {
+          if (fullySelected) {
+            next.delete(segmentRef);
           } else {
-            next.add(branchId);
+            next.add(segmentRef);
           }
         });
-        currentSelection = Array.from(next).sort((a, b) => a - b);
-        setStateValue("selected_branch_ids", currentSelection);
+        currentSelection = Array.from(next).sort();
+        render();
+        setStateValue("selected_segment_refs", currentSelection);
       }
 
-      function toggleSelection(branch) {
+      function toggleSelection(segment) {
+        if (interactionMode !== "select") {
+          return;
+        }
         if (data.selectionMode === "vessel") {
-          toggleVessel(branch);
+          toggleVessel(segment);
         } else {
-          toggleBranch(branch.branchId);
+          toggleSegment(segment.segmentRef);
         }
       }
 
-      clear(svg);
-
-      const width = data.imageWidth ?? 1000;
-      const height = data.imageHeight ?? 1000;
-      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-
-      const background = make("rect", {
-        x: 0,
-        y: 0,
-        width,
-        height,
-        fill: "#050505",
-      });
-      svg.appendChild(background);
-
-      if (data.showBaseImage && data.imageUrl) {
-        const image = make("image", {
-          x: 0,
-          y: 0,
-          width,
-          height,
-          href: data.imageUrl,
-          opacity: data.baseOpacity ?? 1,
-          preserveAspectRatio: "none",
-        });
-        svg.appendChild(image);
+      function clientPointToSvg(event) {
+        const rect = svg.getBoundingClientRect();
+        const viewBox = svg.viewBox.baseVal;
+        const scaleX = viewBox.width / rect.width;
+        const scaleY = viewBox.height / rect.height;
+        return [
+          viewBox.x + (event.clientX - rect.left) * scaleX,
+          viewBox.y + (event.clientY - rect.top) * scaleY,
+        ];
       }
 
-      const branchesGroup = make("g");
-      svg.appendChild(branchesGroup);
+      function beginDraw(event) {
+        if (interactionMode === "select") {
+          return;
+        }
+        event.preventDefault();
+        isDrawing = true;
+        currentStroke = [clientPointToSvg(event)];
+        render();
+      }
 
-      if (data.showSkeleton) {
-        (data.branches ?? []).forEach((branch) => {
-          const branchGroup = make("g");
-          const points = (branch.points ?? [])
-            .map((point) => `${point[0]},${point[1]}`)
-            .join(" ");
-          (branch.strokes ?? []).forEach((strokeLayer) => {
-            const polyline = make("polyline", {
-              points,
+      function extendDraw(event) {
+        if (!isDrawing) {
+          return;
+        }
+        event.preventDefault();
+        const point = clientPointToSvg(event);
+        const previous = currentStroke[currentStroke.length - 1];
+        if (!previous || Math.hypot(point[0] - previous[0], point[1] - previous[1]) >= 1.5) {
+          currentStroke.push(point);
+          render();
+        }
+      }
+
+      function finishDraw() {
+        if (!isDrawing) {
+          return;
+        }
+        isDrawing = false;
+        if (currentStroke.length >= 2) {
+          setStateValue("drawn_segment_points", currentStroke);
+          setStateValue("draw_action", interactionMode === "redraw" ? "redraw" : "create");
+        }
+        currentStroke = [];
+        render();
+      }
+
+      function render() {
+        clear(svg);
+        const width = data.imageWidth ?? 1000;
+        const height = data.imageHeight ?? 1000;
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        svg.style.cursor = interactionMode === "select" ? "crosshair" : "cell";
+
+        svg.appendChild(make("rect", { x: 0, y: 0, width, height, fill: "#050505" }));
+
+        if (data.showBaseImage && data.imageUrl) {
+          svg.appendChild(make("image", {
+            x: 0,
+            y: 0,
+            width,
+            height,
+            href: data.imageUrl,
+            opacity: data.baseOpacity ?? 1,
+            preserveAspectRatio: "none",
+          }));
+        }
+
+        const segmentsGroup = make("g");
+        svg.appendChild(segmentsGroup);
+        if (data.showSkeleton) {
+          (data.segments ?? []).forEach((segment) => {
+            const segmentGroup = make("g");
+            const segmentPoints = pointsAttr(segment.points ?? []);
+            (segment.strokes ?? []).forEach((strokeLayer) => {
+              const polyline = make("polyline", {
+                points: segmentPoints,
+                fill: "none",
+                stroke: strokeLayer.color ?? "#ff3b30",
+                "stroke-width": strokeLayer.width ?? 2.2,
+                "stroke-dasharray": strokeLayer.dasharray ?? "",
+                "stroke-opacity": strokeLayer.opacity ?? 1,
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+                "vector-effect": "non-scaling-stroke",
+              });
+              polyline.style.pointerEvents = "none";
+              segmentGroup.appendChild(polyline);
+            });
+            if (currentSelection.includes(segment.segmentRef)) {
+              const selectedPolyline = make("polyline", {
+                points: segmentPoints,
+                fill: "none",
+                stroke: selectedColor,
+                "stroke-width": 3.0,
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+                "vector-effect": "non-scaling-stroke",
+              });
+              selectedPolyline.style.pointerEvents = "none";
+              segmentGroup.appendChild(selectedPolyline);
+            }
+
+            const hitArea = make("polyline", {
+              points: segmentPoints,
               fill: "none",
-              stroke: strokeLayer.color ?? "#ff3b30",
-              "stroke-width": strokeLayer.width ?? 2.2,
-              "stroke-dasharray": strokeLayer.dasharray ?? "",
-              "stroke-opacity": strokeLayer.opacity ?? 1,
+              stroke: "rgba(0, 0, 0, 0)",
+              "stroke-width": 14,
               "stroke-linecap": "round",
               "stroke-linejoin": "round",
               "vector-effect": "non-scaling-stroke",
             });
-            polyline.style.pointerEvents = "none";
-            branchGroup.appendChild(polyline);
-          });
+            hitArea.style.cursor = segment.locked ? "default" : "pointer";
+            if (!segment.locked) {
+              hitArea.addEventListener("click", (event) => {
+                event.stopPropagation();
+                toggleSelection(segment);
+              });
+            }
+            segmentGroup.appendChild(hitArea);
+            segmentsGroup.appendChild(segmentGroup);
 
-          const hitArea = make("polyline", {
-            points,
+            if (data.showLabels && segment.label) {
+              const text = make("text", {
+                x: segment.label[0],
+                y: segment.label[1],
+                fill: segment.labelColor ?? "#ffffff",
+                "font-size": 12,
+                "font-weight": 700,
+                "text-anchor": "middle",
+                "paint-order": "stroke",
+                stroke: "rgba(0, 0, 0, 0.7)",
+                "stroke-width": 2,
+              });
+              text.textContent = String(segment.labelText ?? segment.segmentRef);
+              text.style.pointerEvents = "none";
+              segmentsGroup.appendChild(text);
+            }
+          });
+        }
+
+        if (currentStroke.length >= 2) {
+          const draft = make("polyline", {
+            points: pointsAttr(currentStroke),
             fill: "none",
-            stroke: "rgba(0, 0, 0, 0)",
-            "stroke-width": 12,
+            stroke: "#ffd166",
+            "stroke-width": 3.2,
             "stroke-linecap": "round",
             "stroke-linejoin": "round",
             "vector-effect": "non-scaling-stroke",
           });
-          hitArea.style.cursor = branch.locked ? "default" : "pointer";
-          if (!branch.locked) {
-            hitArea.addEventListener("click", (event) => {
-              event.stopPropagation();
-              toggleSelection(branch);
-            });
-          }
-          branchGroup.appendChild(hitArea);
-          branchesGroup.appendChild(branchGroup);
+          draft.style.pointerEvents = "none";
+          svg.appendChild(draft);
+        }
 
-          if (data.showLabels && branch.label) {
+        if (data.showVesselLabels) {
+          (data.vesselLabels ?? []).forEach((label) => {
             const text = make("text", {
-              x: branch.label[0],
-              y: branch.label[1],
-              fill: branch.labelColor ?? "#ffffff",
-              "font-size": 12,
-              "font-weight": 700,
+              x: label.position[0],
+              y: label.position[1],
+              fill: label.color ?? "#ffffff",
+              "font-size": 16,
+              "font-weight": 800,
               "text-anchor": "middle",
               "paint-order": "stroke",
-              stroke: "rgba(0, 0, 0, 0.7)",
-              "stroke-width": 2,
+              stroke: "rgba(0, 0, 0, 0.78)",
+              "stroke-width": 3,
             });
-            text.textContent = String(branch.branchId);
+            text.textContent = String(label.text);
             text.style.pointerEvents = "none";
-            branchesGroup.appendChild(text);
-          }
-        });
-      }
-
-      if (data.showVesselLabels) {
-        (data.vesselLabels ?? []).forEach((label) => {
-          const text = make("text", {
-            x: label.position[0],
-            y: label.position[1],
-            fill: label.color ?? "#ffffff",
-            "font-size": 16,
-            "font-weight": 800,
-            "text-anchor": "middle",
-            "paint-order": "stroke",
-            stroke: "rgba(0, 0, 0, 0.78)",
-            "stroke-width": 3,
+            svg.appendChild(text);
           });
-          text.textContent = String(label.text);
-          text.style.pointerEvents = "none";
-          svg.appendChild(text);
-        });
+        }
       }
 
+      svg.onpointerdown = beginDraw;
+      svg.onpointermove = extendDraw;
+      svg.onpointerup = finishDraw;
+      svg.onpointerleave = finishDraw;
+      svg.onpointercancel = finishDraw;
+
+      render();
       return () => {};
     }
     """,
@@ -222,7 +314,7 @@ BRANCH_VIEWER = st.components.v2.component(
 
 
 NODE_ENDPOINT_VIEWER = st.components.v2.component(
-    name="retina_node_endpoint_viewer",
+    name="retina_geometry_endpoint_viewer",
     html="""
     <div class="endpoint-shell">
       <svg id="endpoint-viewer" preserveAspectRatio="xMidYMid meet"></svg>
@@ -245,6 +337,7 @@ NODE_ENDPOINT_VIEWER = st.components.v2.component(
       display: block;
       background: #050505;
       cursor: pointer;
+      touch-action: none;
     }
     """,
     js="""
@@ -252,9 +345,9 @@ NODE_ENDPOINT_VIEWER = st.components.v2.component(
       const { parentElement, data, setStateValue } = component;
       const svg = parentElement.querySelector("#endpoint-viewer");
       const svgNs = "http://www.w3.org/2000/svg";
-      let startNodeId = data.startNodeId ?? null;
-      let endNodeId = data.endNodeId ?? null;
-      let nextTarget = data.nextEndpointTarget ?? (startNodeId == null ? "start" : "end");
+      let startEndpoint = data.startEndpoint ?? null;
+      let endEndpoint = data.endEndpoint ?? null;
+      let nextTarget = data.nextEndpointTarget ?? (startEndpoint == null ? "start" : "end");
 
       function make(tag, attrs = {}) {
         const node = document.createElementNS(svgNs, tag);
@@ -270,138 +363,188 @@ NODE_ENDPOINT_VIEWER = st.components.v2.component(
         }
       }
 
-      function setEndpoint(nodeId) {
+      function pointsAttr(points) {
+        return (points ?? []).map((point) => `${point[0]},${point[1]}`).join(" ");
+      }
+
+      function nearestPointOnPolyline(point, polyline, segmentRef) {
+        let best = null;
+        let traversed = 0;
+        for (let index = 0; index < polyline.length - 1; index += 1) {
+          const start = polyline[index];
+          const end = polyline[index + 1];
+          const dx = end[0] - start[0];
+          const dy = end[1] - start[1];
+          const length = Math.hypot(dx, dy);
+          if (length === 0) {
+            continue;
+          }
+          const t = Math.max(0, Math.min(1, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / (length * length)));
+          const projected = [start[0] + dx * t, start[1] + dy * t];
+          const distance = Math.hypot(point[0] - projected[0], point[1] - projected[1]);
+          const candidate = {
+            kind: "geometry_point",
+            point: projected,
+            segment_ref: segmentRef,
+            distance_from_start: traversed + t * length,
+            distance,
+          };
+          if (best == null || candidate.distance < best.distance) {
+            best = candidate;
+          }
+          traversed += length;
+        }
+        return best;
+      }
+
+      function setEndpoint(endpoint) {
         if (nextTarget === "start") {
-          const previousStart = startNodeId;
-          startNodeId = nodeId;
-          if (endNodeId === nodeId) {
-            endNodeId = previousStart;
+          startEndpoint = endpoint;
+          if (endEndpoint && Math.hypot(endEndpoint.point[0] - endpoint.point[0], endEndpoint.point[1] - endpoint.point[1]) < 1) {
+            endEndpoint = null;
           }
           nextTarget = "end";
         } else {
-          const previousEnd = endNodeId;
-          endNodeId = nodeId;
-          if (startNodeId === nodeId) {
-            startNodeId = previousEnd;
+          endEndpoint = endpoint;
+          if (startEndpoint && Math.hypot(startEndpoint.point[0] - endpoint.point[0], startEndpoint.point[1] - endpoint.point[1]) < 1) {
+            startEndpoint = null;
           }
           nextTarget = "start";
         }
-        setStateValue("start_node_id", startNodeId);
-        setStateValue("end_node_id", endNodeId);
+        setStateValue("start_endpoint", startEndpoint);
+        setStateValue("end_endpoint", endEndpoint);
         setStateValue("next_endpoint_target", nextTarget);
+        render();
       }
 
-      clear(svg);
-
-      const points = [];
-      (data.branches ?? []).forEach((branch) => {
-        (branch.points ?? []).forEach((point) => points.push(point));
-      });
-      (data.nodes ?? []).forEach((node) => points.push([node.x, node.y]));
-
-      const imageWidth = data.imageWidth ?? 1000;
-      const imageHeight = data.imageHeight ?? 1000;
-      let minX = 0;
-      let minY = 0;
-      let maxX = imageWidth;
-      let maxY = imageHeight;
-      if (points.length > 0) {
-        minX = Math.min(...points.map((point) => point[0]));
-        minY = Math.min(...points.map((point) => point[1]));
-        maxX = Math.max(...points.map((point) => point[0]));
-        maxY = Math.max(...points.map((point) => point[1]));
-        const spanX = Math.max(1, maxX - minX);
-        const spanY = Math.max(1, maxY - minY);
-        const padding = Math.max(20, Math.max(spanX, spanY) * 0.12);
-        minX = Math.max(0, minX - padding);
-        minY = Math.max(0, minY - padding);
-        maxX = Math.min(imageWidth, maxX + padding);
-        maxY = Math.min(imageHeight, maxY + padding);
+      function clientPointToSvg(event) {
+        const rect = svg.getBoundingClientRect();
+        const viewBox = svg.viewBox.baseVal;
+        const scaleX = viewBox.width / rect.width;
+        const scaleY = viewBox.height / rect.height;
+        return [
+          viewBox.x + (event.clientX - rect.left) * scaleX,
+          viewBox.y + (event.clientY - rect.top) * scaleY,
+        ];
       }
 
-      const width = Math.max(1, maxX - minX);
-      const height = Math.max(1, maxY - minY);
-      svg.setAttribute("viewBox", `${minX} ${minY} ${width} ${height}`);
-
-      const background = make("rect", {
-        x: minX,
-        y: minY,
-        width,
-        height,
-        fill: "#050505",
-      });
-      svg.appendChild(background);
-
-      if (data.imageUrl) {
-        const image = make("image", {
-          x: 0,
-          y: 0,
-          width: imageWidth,
-          height: imageHeight,
-          href: data.imageUrl,
-          opacity: data.baseOpacity ?? 0.55,
-          preserveAspectRatio: "none",
-        });
-        svg.appendChild(image);
-      }
-
-      (data.branches ?? []).forEach((branch) => {
-        const pointsAttr = (branch.points ?? [])
-          .map((point) => `${point[0]},${point[1]}`)
-          .join(" ");
-        (branch.strokes ?? [{ color: "#00c2a8", width: 3 }]).forEach((strokeLayer) => {
-          const polyline = make("polyline", {
-            points: pointsAttr,
-            fill: "none",
-            stroke: strokeLayer.color ?? "#00c2a8",
-            "stroke-width": strokeLayer.width ?? 3,
-            "stroke-opacity": strokeLayer.opacity ?? 1,
-            "stroke-linecap": "round",
-            "stroke-linejoin": "round",
-            "vector-effect": "non-scaling-stroke",
-          });
-          polyline.style.pointerEvents = "none";
-          svg.appendChild(polyline);
-        });
-      });
-
-      const markerRadius = Math.max(3, Math.min(width, height) * 0.01);
-      const labelFontSize = Math.max(4.5, Math.min(7.5, Math.min(width, height) * 0.012));
-      (data.nodes ?? []).forEach((node) => {
-        const isStart = node.node_id === startNodeId;
-        const isEnd = node.node_id === endNodeId;
-        const circle = make("circle", {
-          cx: node.x,
-          cy: node.y,
-          r: markerRadius,
-          fill: isStart ? "#00c2a8" : isEnd ? "#ffd166" : "rgba(5, 5, 5, 0.85)",
-          stroke: isStart ? "#ffffff" : isEnd ? "#ffffff" : "rgba(255, 255, 255, 0.9)",
-          "stroke-width": isStart || isEnd ? 3 : 2,
+      function renderMarker(endpoint, fill, labelText) {
+        if (!endpoint || !endpoint.point) {
+          return;
+        }
+        svg.appendChild(make("circle", {
+          cx: endpoint.point[0],
+          cy: endpoint.point[1],
+          r: 5.5,
+          fill,
+          stroke: "#ffffff",
+          "stroke-width": 2.5,
           "vector-effect": "non-scaling-stroke",
-        });
-        circle.addEventListener("click", (event) => {
-          event.stopPropagation();
-          setEndpoint(node.node_id);
-        });
-        svg.appendChild(circle);
-
+        }));
         const label = make("text", {
-          x: node.x,
-          y: node.y - markerRadius * 1.2,
+          x: endpoint.point[0],
+          y: endpoint.point[1] - 8,
           fill: "#ffffff",
-          "font-size": labelFontSize,
+          "font-size": 12,
           "font-weight": 800,
           "text-anchor": "middle",
           "paint-order": "stroke",
           stroke: "rgba(0, 0, 0, 0.8)",
-          "stroke-width": 1.1,
+          "stroke-width": 2,
           "vector-effect": "non-scaling-stroke",
         });
-        label.textContent = String(node.node_id);
+        label.textContent = labelText;
         label.style.pointerEvents = "none";
         svg.appendChild(label);
-      });
+      }
 
+      function render() {
+        clear(svg);
+        const points = [];
+        (data.segments ?? []).forEach((segment) => {
+          (segment.points ?? []).forEach((point) => points.push(point));
+        });
+
+        const imageWidth = data.imageWidth ?? 1000;
+        const imageHeight = data.imageHeight ?? 1000;
+        let minX = 0;
+        let minY = 0;
+        let maxX = imageWidth;
+        let maxY = imageHeight;
+        if (points.length > 0) {
+          minX = Math.min(...points.map((point) => point[0]));
+          minY = Math.min(...points.map((point) => point[1]));
+          maxX = Math.max(...points.map((point) => point[0]));
+          maxY = Math.max(...points.map((point) => point[1]));
+          const spanX = Math.max(1, maxX - minX);
+          const spanY = Math.max(1, maxY - minY);
+          const padding = Math.max(20, Math.max(spanX, spanY) * 0.12);
+          minX = Math.max(0, minX - padding);
+          minY = Math.max(0, minY - padding);
+          maxX = Math.min(imageWidth, maxX + padding);
+          maxY = Math.min(imageHeight, maxY + padding);
+        }
+
+        const width = Math.max(1, maxX - minX);
+        const height = Math.max(1, maxY - minY);
+        svg.setAttribute("viewBox", `${minX} ${minY} ${width} ${height}`);
+        svg.appendChild(make("rect", { x: minX, y: minY, width, height, fill: "#050505" }));
+
+        if (data.imageUrl) {
+          svg.appendChild(make("image", {
+            x: 0,
+            y: 0,
+            width: imageWidth,
+            height: imageHeight,
+            href: data.imageUrl,
+            opacity: data.baseOpacity ?? 0.55,
+            preserveAspectRatio: "none",
+          }));
+        }
+
+        (data.segments ?? []).forEach((segment) => {
+          const segmentPoints = pointsAttr(segment.points ?? []);
+          (segment.strokes ?? [{ color: "#00c2a8", width: 3 }]).forEach((strokeLayer) => {
+            const polyline = make("polyline", {
+              points: segmentPoints,
+              fill: "none",
+              stroke: strokeLayer.color ?? "#00c2a8",
+              "stroke-width": strokeLayer.width ?? 3,
+              "stroke-opacity": strokeLayer.opacity ?? 1,
+              "stroke-linecap": "round",
+              "stroke-linejoin": "round",
+              "vector-effect": "non-scaling-stroke",
+            });
+            polyline.style.pointerEvents = "none";
+            svg.appendChild(polyline);
+          });
+
+          const hitArea = make("polyline", {
+            points: segmentPoints,
+            fill: "none",
+            stroke: "rgba(0, 0, 0, 0)",
+            "stroke-width": 18,
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round",
+            "vector-effect": "non-scaling-stroke",
+          });
+          hitArea.addEventListener("click", (event) => {
+            event.stopPropagation();
+            const clickPoint = clientPointToSvg(event);
+            const endpoint = nearestPointOnPolyline(clickPoint, segment.points ?? [], segment.segmentRef);
+            if (endpoint) {
+              delete endpoint.distance;
+              setEndpoint(endpoint);
+            }
+          });
+          svg.appendChild(hitArea);
+        });
+
+        renderMarker(startEndpoint, "#00c2a8", "S");
+        renderMarker(endEndpoint, "#ffd166", "E");
+      }
+
+      render();
       return () => {};
     }
     """,
@@ -415,132 +558,78 @@ def build_viewer_branches(
     allow_reuse_assigned: bool,
     provisional_synthetic_links: list[dict[str, object]] | None = None,
 ) -> list[dict]:
-    branch_memberships: dict[int, list[str]] = {
-        int(branch_id): [] for branch_id in branches_df["branch_id"].astype(int).tolist()
+    del paths_payload
+    geometry_map = get_segment_geometry(branches_df, review_state.get("manual_segments", {}))
+    memberships: dict[str, list[str]] = {segment_ref: [] for segment_ref in geometry_map}
+    segment_vessels: dict[str, list[str]] = {segment_ref: [] for segment_ref in geometry_map}
+    vessel_segment_refs = {
+        vessel_name: segment_refs_for_vessel(vessel)
+        for vessel_name, vessel in review_state.get("vessels", {}).items()
     }
-    branch_vessels: dict[int, list[str]] = {
-        int(branch_id): [] for branch_id in branches_df["branch_id"].astype(int).tolist()
-    }
-    vessel_branch_ids = {
-        vessel_name: sorted(int(branch_id) for branch_id in vessel["branch_ids"])
-        for vessel_name, vessel in review_state["vessels"].items()
-    }
-    assigned_branch_ids: set[int] = set()
-    for vessel_name, vessel in review_state["vessels"].items():
-        color = ARTERE_COLOR if vessel["category"] == "artere" else VEINE_COLOR
-        for branch_id in vessel["branch_ids"]:
-            branch_id = int(branch_id)
-            branch_memberships.setdefault(branch_id, []).append(color)
-            branch_vessels.setdefault(branch_id, []).append(vessel_name)
-            assigned_branch_ids.add(branch_id)
+    assigned_refs: set[str] = set()
+    for vessel_name, vessel in review_state.get("vessels", {}).items():
+        color = ARTERE_COLOR if vessel.get("category") == "artere" else VEINE_COLOR
+        for segment_ref in segment_refs_for_vessel(vessel):
+            memberships.setdefault(segment_ref, []).append(color)
+            segment_vessels.setdefault(segment_ref, []).append(vessel_name)
+            assigned_refs.add(segment_ref)
 
-    selected_branch_set = set(int(branch_id) for branch_id in review_state["selected_branch_ids"])
-    path_map = {item["branchId"]: item for item in paths_payload}
-    branch_rows = branches_df.set_index("branch_id", drop=False)
-    viewer_branches: list[dict] = []
-    for branch_id, memberships in branch_memberships.items():
-        path = path_map.get(branch_id)
-        if path is None:
-            continue
-        is_selected = branch_id in selected_branch_set
+    selected_refs = set(review_state.get("selected_segment_refs", []))
+    viewer_segments: list[dict] = []
+    for segment_ref in sorted(geometry_map, key=segment_ref_sort_key):
+        geometry = geometry_map[segment_ref]
+        is_selected = segment_ref in selected_refs
+        membership_colors = list(dict.fromkeys(memberships.get(segment_ref, [])))
         strokes: list[dict[str, float | str]] = []
-        if memberships:
-            unique_memberships = list(dict.fromkeys(memberships))
-            base_width = 5.6 if len(unique_memberships) > 1 else 3.0
-            width_step = 1.4 if len(unique_memberships) > 1 else 0.0
-            for index, color in enumerate(unique_memberships):
-                strokes.append(
-                    {
-                        "color": color,
-                        "width": max(2.4, base_width - index * width_step),
-                    }
-                )
+        if membership_colors:
+            base_width = 5.6 if len(membership_colors) > 1 else 3.2
+            width_step = 1.4 if len(membership_colors) > 1 else 0.0
+            for index, color in enumerate(membership_colors):
+                strokes.append({"color": color, "width": max(2.5, base_width - index * width_step)})
         else:
             strokes.append(
                 {
-                    "color": _vascx_branch_color(branch_rows.loc[branch_id]),
-                    "width": 2.4,
+                    "color": _segment_color(str(geometry["vascx_category"])),
+                    "width": 2.6 if geometry["source"] == "model" else 2.9,
+                    "dasharray": "" if geometry["source"] == "model" else "7 5",
+                    "opacity": 0.95,
                 }
             )
-
         if is_selected:
-            strokes.append(
-                {
-                    "color": SELECTED_COLOR,
-                    "width": 2.8,
-                }
-            )
+            strokes.append({"color": SELECTED_COLOR, "width": 3.0})
 
-        viewer_branches.append(
+        viewer_segments.append(
             {
-                "branchId": branch_id,
-                "vesselBranchIds": sorted(
+                "segmentRef": segment_ref,
+                "source": geometry["source"],
+                "labelText": str(geometry["id"]),
+                "vesselSegmentRefs": sorted(
                     {
-                        linked_branch_id
-                        for vessel_name in branch_vessels.get(branch_id, [])
-                        for linked_branch_id in vessel_branch_ids.get(vessel_name, [])
-                    }
+                        linked_ref
+                        for vessel_name in segment_vessels.get(segment_ref, [])
+                        for linked_ref in vessel_segment_refs.get(vessel_name, [])
+                    },
+                    key=segment_ref_sort_key,
                 ),
-                "vesselNames": branch_vessels.get(branch_id, []),
-                "points": path["points"],
-                "label": path["label"],
+                "vesselNames": segment_vessels.get(segment_ref, []),
+                "points": geometry["points"],
+                "label": geometry["label_position"],
                 "labelColor": SELECTED_COLOR if is_selected else "#ffffff",
-                "locked": (branch_id in assigned_branch_ids) and not is_selected and not allow_reuse_assigned,
+                "locked": (segment_ref in assigned_refs) and not is_selected and not allow_reuse_assigned,
                 "strokes": strokes,
             }
         )
 
     synthetic_index = 0
-    for vessel in review_state["vessels"].values():
-        color = ARTERE_COLOR if vessel["category"] == "artere" else VEINE_COLOR
+    for vessel in review_state.get("vessels", {}).values():
+        color = ARTERE_COLOR if vessel.get("category") == "artere" else VEINE_COLOR
         for synthetic_link in vessel.get("synthetic_links", []):
-            viewer_branches.append(
-                {
-                    "branchId": f"saved-synthetic-{synthetic_index}",
-                    "points": synthetic_link["points"],
-                    "label": None,
-                    "labelColor": "#ffffff",
-                    "locked": True,
-                    "strokes": [
-                        {
-                            "color": color,
-                            "width": 5.2,
-                            "opacity": 0.45,
-                        },
-                        {
-                            "color": color,
-                            "width": 2.6,
-                            "opacity": 1,
-                        },
-                    ],
-                }
-            )
+            viewer_segments.append(_synthetic_viewer_segment(f"saved-synthetic:{synthetic_index}", synthetic_link, color))
             synthetic_index += 1
-
     for synthetic_link in provisional_synthetic_links or []:
-        viewer_branches.append(
-            {
-                "branchId": f"provisional-synthetic-{synthetic_index}",
-                "points": synthetic_link["points"],
-                "label": None,
-                "labelColor": "#ffffff",
-                "locked": True,
-                "strokes": [
-                    {
-                        "color": SELECTED_COLOR,
-                        "width": 5.6,
-                        "opacity": 0.45,
-                    },
-                    {
-                        "color": SELECTED_COLOR,
-                        "width": 2.8,
-                        "opacity": 1,
-                    }
-                ],
-            }
-        )
+        viewer_segments.append(_synthetic_viewer_segment(f"provisional-synthetic:{synthetic_index}", synthetic_link, SELECTED_COLOR))
         synthetic_index += 1
-    return viewer_branches
+    return viewer_segments
 
 
 def build_vessel_labels(
@@ -548,28 +637,40 @@ def build_vessel_labels(
     paths_payload: list[dict],
     review_state: dict,
 ) -> list[dict]:
-    path_map = {item["branchId"]: item for item in paths_payload}
-    vessel_labels: list[dict] = []
-    for vessel_name, vessel in sorted(review_state["vessels"].items()):
+    del paths_payload
+    geometry_map = get_segment_geometry(branches_df, review_state.get("manual_segments", {}))
+    labels: list[dict] = []
+    for vessel_name, vessel in sorted(review_state.get("vessels", {}).items()):
         points: list[list[float]] = []
-        for branch_id in vessel.get("branch_ids", []):
-            path = path_map.get(int(branch_id))
-            if path is not None:
-                points.extend(path["points"])
+        for segment_ref in segment_refs_for_vessel(vessel):
+            geometry = geometry_map.get(segment_ref)
+            if geometry is not None:
+                points.extend(geometry["points"])
         for synthetic_link in vessel.get("synthetic_links", []):
             points.extend(synthetic_link.get("points", []))
-
         if not points:
             continue
-
-        point_array = pd.DataFrame(points, columns=["x", "y"])
-        centroid_x = float(point_array["x"].mean())
-        centroid_y = float(point_array["y"].mean())
-        vessel_labels.append(
+        point_df = pd.DataFrame(points, columns=["x", "y"])
+        labels.append(
             {
                 "text": vessel_name,
-                "position": [centroid_x, centroid_y],
-                "color": ARTERE_COLOR if vessel["category"] == "artere" else VEINE_COLOR,
+                "position": [float(point_df["x"].mean()), float(point_df["y"].mean())],
+                "color": ARTERE_COLOR if vessel.get("category") == "artere" else VEINE_COLOR,
             }
         )
-    return vessel_labels
+    return labels
+
+
+def _synthetic_viewer_segment(segment_ref: str, synthetic_link: dict[str, object], color: str) -> dict:
+    return {
+        "segmentRef": segment_ref,
+        "source": "synthetic",
+        "points": synthetic_link["points"],
+        "label": None,
+        "labelColor": "#ffffff",
+        "locked": True,
+        "strokes": [
+            {"color": color, "width": 5.2, "opacity": 0.45},
+            {"color": color, "width": 2.6, "opacity": 1},
+        ],
+    }
