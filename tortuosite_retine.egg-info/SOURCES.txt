@@ -1,5 +1,6 @@
 README.md
 pyproject.toml
+tests/test_segments.py
 tortuosite_retine.egg-info/PKG-INFO
 tortuosite_retine.egg-info/SOURCES.txt
 tortuosite_retine.egg-info/dependency_links.txt
@@ -34,6 +35,7 @@ tortuosite_score/vessels_detection/deep_model.py
 tortuosite_score/vessels_detection/dl_extra.py
 tortuosite_score/vessels_detection/image_utils.py
 tortuosite_score/vessels_detection/main.py
+tortuosite_score/vessels_detection/segments.py
 tortuosite_score/vessels_detection/skan_extra.py
 tortuosite_score/vessels_detection/skeleton_graph.py
 tortuosite_score/vessels_detection/vascx_model.py

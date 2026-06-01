@@ -34,6 +34,20 @@ BRANCH_VIEWER = st.components.v2.component(
     </div>
     """,
     css="""
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #050505;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
     .viewer-shell {
       width: 100%;
       height: 100%;
@@ -321,6 +335,20 @@ NODE_ENDPOINT_VIEWER = st.components.v2.component(
     </div>
     """,
     css="""
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #050505;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
     .endpoint-shell {
       width: 100%;
       height: 100%;

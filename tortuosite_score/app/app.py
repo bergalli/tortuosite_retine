@@ -189,7 +189,7 @@ def _sync_viewer_state(
         normalized = sorted({str(segment_ref) for segment_ref in next_selection}, key=segment_ref_sort_key)
         if normalized != segment_refs_for_review_state(review_state):
             review_state["selected_segment_refs"] = normalized
-            st.rerun(scope="fragment")
+            st.rerun()
 
     draw_action = getattr(viewer_result, "draw_action", None)
     drawn_points = getattr(viewer_result, "drawn_segment_points", None)
@@ -245,7 +245,7 @@ def _sync_endpoint_selection(
             st.session_state[next_endpoint_target_key] = next_target
             changed = True
     if changed:
-        st.rerun(scope="fragment")
+        st.rerun()
     return changed
 
 
@@ -364,28 +364,44 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
         provisional_synthetic_links=provisional_resolution["synthetic_links"],
     )
     interaction_mode = {"Select": "select", "Draw new": "draw", "Redraw selected": "redraw"}[interaction_mode_label]
-    viewer_result = BRANCH_VIEWER(
-        data={
-            "imageUrl": bundle["image_url"],
-            "imageWidth": bundle["image_width"],
-            "imageHeight": bundle["image_height"],
-            "segments": viewer_segments,
-            "selectedSegmentRefs": selected_segment_refs,
-            "selectionMode": "vessel" if selection_mode == "Whole vessels" else "segment",
-            "interactionMode": interaction_mode,
-            "showBaseImage": show_base_image,
-            "showSkeleton": show_skeleton,
-            "showLabels": show_labels,
-            "showVesselLabels": show_vessel_labels,
-            "vesselLabels": build_vessel_labels(branches_df, bundle["paths_payload"], review_state),
-            "baseOpacity": base_opacity,
-        },
-        default={"selected_segment_refs": selected_segment_refs},
-        on_selected_segment_refs_change=lambda: None,
-        key=f"branch_viewer::{selected_run_name}::{st.session_state[viewer_reset_key]}",
-        width="stretch",
-        height=860,
-    )
+    selected_start_endpoint = st.session_state.get(start_endpoint_key)
+    selected_end_endpoint = st.session_state.get(end_endpoint_key)
+    endpoint_segments = [
+        segment
+        for segment in viewer_segments
+        if segment.get("segmentRef") in set(selected_segment_refs)
+        or str(segment.get("segmentRef", "")).startswith("provisional-synthetic:")
+    ]
+
+    if selected_segment_refs:
+        viewer_col, endpoint_col = st.columns([2.35, 1.0], gap="large", vertical_alignment="top")
+    else:
+        viewer_col = st.container()
+        endpoint_col = None
+
+    with viewer_col:
+        viewer_result = BRANCH_VIEWER(
+            data={
+                "imageUrl": bundle["image_url"],
+                "imageWidth": bundle["image_width"],
+                "imageHeight": bundle["image_height"],
+                "segments": viewer_segments,
+                "selectedSegmentRefs": selected_segment_refs,
+                "selectionMode": "vessel" if selection_mode == "Whole vessels" else "segment",
+                "interactionMode": interaction_mode,
+                "showBaseImage": show_base_image,
+                "showSkeleton": show_skeleton,
+                "showLabels": show_labels,
+                "showVesselLabels": show_vessel_labels,
+                "vesselLabels": build_vessel_labels(branches_df, bundle["paths_payload"], review_state),
+                "baseOpacity": base_opacity,
+            },
+            default={"selected_segment_refs": selected_segment_refs},
+            on_selected_segment_refs_change=lambda: None,
+            key=f"branch_viewer::{selected_run_name}::{st.session_state[viewer_reset_key]}",
+            width="stretch",
+            height=720,
+        )
     _sync_viewer_state(
         viewer_result,
         review_state,
@@ -394,6 +410,47 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
         viewer_reset_key,
         redraw_target_ref,
     )
+
+    if endpoint_col is not None:
+        with endpoint_col:
+            st.subheader("Tortuosity endpoints")
+            st.caption(
+                "After selecting the vessel segments on the left, click this zoomed view to choose "
+                "the start and end points for tortuosity scoring."
+            )
+            endpoint_result = NODE_ENDPOINT_VIEWER(
+                data={
+                    "imageUrl": bundle["image_url"],
+                    "imageWidth": bundle["image_width"],
+                    "imageHeight": bundle["image_height"],
+                    "segments": endpoint_segments,
+                    "startEndpoint": selected_start_endpoint,
+                    "endEndpoint": selected_end_endpoint,
+                    "nextEndpointTarget": st.session_state[next_endpoint_target_key],
+                    "baseOpacity": 0.62,
+                },
+                default={
+                    "start_endpoint": selected_start_endpoint,
+                    "end_endpoint": selected_end_endpoint,
+                    "next_endpoint_target": st.session_state[next_endpoint_target_key],
+                },
+                on_start_endpoint_change=lambda: None,
+                on_end_endpoint_change=lambda: None,
+                on_next_endpoint_target_change=lambda: None,
+                key=f"geometry_endpoint_viewer::{selected_run_name}",
+                width="stretch",
+                height=360,
+            )
+            _sync_endpoint_selection(endpoint_result, start_endpoint_key, end_endpoint_key, next_endpoint_target_key)
+            selected_start_endpoint = st.session_state.get(start_endpoint_key)
+            selected_end_endpoint = st.session_state.get(end_endpoint_key)
+            if selected_start_endpoint and selected_end_endpoint:
+                start_x, start_y = selected_start_endpoint["point"]
+                end_x, end_y = selected_end_endpoint["point"]
+                st.caption(
+                    f"Start `{start_x:.1f}, {start_y:.1f}`, end `{end_x:.1f}, {end_y:.1f}`. "
+                    "Each click alternates between setting start and end."
+                )
 
     selected_segment_refs = segment_refs_for_review_state(review_state)
     selected_complete_vessels = _selected_complete_vessel_names(review_state, selected_segment_refs)
@@ -407,50 +464,6 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
             st.caption(
                 "Complete saved vessel(s) in selection: "
                 + ", ".join(f"`{vessel_name}`" for vessel_name in selected_complete_vessels)
-            )
-
-    selected_start_endpoint = st.session_state.get(start_endpoint_key)
-    selected_end_endpoint = st.session_state.get(end_endpoint_key)
-    endpoint_segments = [
-        segment
-        for segment in viewer_segments
-        if segment.get("segmentRef") in set(selected_segment_refs)
-        or str(segment.get("segmentRef", "")).startswith("provisional-synthetic:")
-    ]
-    if selected_segment_refs:
-        st.subheader("Tortuosity endpoints")
-        endpoint_result = NODE_ENDPOINT_VIEWER(
-            data={
-                "imageUrl": bundle["image_url"],
-                "imageWidth": bundle["image_width"],
-                "imageHeight": bundle["image_height"],
-                "segments": endpoint_segments,
-                "startEndpoint": selected_start_endpoint,
-                "endEndpoint": selected_end_endpoint,
-                "nextEndpointTarget": st.session_state[next_endpoint_target_key],
-                "baseOpacity": 0.62,
-            },
-            default={
-                "start_endpoint": selected_start_endpoint,
-                "end_endpoint": selected_end_endpoint,
-                "next_endpoint_target": st.session_state[next_endpoint_target_key],
-            },
-            on_start_endpoint_change=lambda: None,
-            on_end_endpoint_change=lambda: None,
-            on_next_endpoint_target_change=lambda: None,
-            key=f"geometry_endpoint_viewer::{selected_run_name}",
-            width="stretch",
-            height=320,
-        )
-        _sync_endpoint_selection(endpoint_result, start_endpoint_key, end_endpoint_key, next_endpoint_target_key)
-        selected_start_endpoint = st.session_state.get(start_endpoint_key)
-        selected_end_endpoint = st.session_state.get(end_endpoint_key)
-        if selected_start_endpoint and selected_end_endpoint:
-            start_x, start_y = selected_start_endpoint["point"]
-            end_x, end_y = selected_end_endpoint["point"]
-            st.caption(
-                f"Start `{start_x:.1f}, {start_y:.1f}`, end `{end_x:.1f}, {end_y:.1f}`. "
-                "Each click alternates between setting start and end."
             )
 
     if selected_segment_refs and redraw_target_ref:
