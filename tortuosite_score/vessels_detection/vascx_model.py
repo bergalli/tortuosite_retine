@@ -10,7 +10,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from tortuosite_score.vessels_detection.deep_model import _normalize_rgb_uint8
+from tortuosite_score.vessels_detection.dl_extra import DEEP_INSTALL_HINT, require_deep_learning
+from tortuosite_score.vessels_detection.image_utils import normalize_rgb_uint8
 
 
 AV_MODEL_ID = "Eyened/vascx:artery_vein/av_july24.pt"
@@ -49,7 +50,7 @@ def _load_segmentation_model(model_id: str, size: int, use_contrast_enhancement:
     except Exception as exc:
         raise RuntimeError(
             "VascX backend requires the optional package `vascx-simplify`. "
-            "Install it with `uv add 'vascx-simplify>=0.1.11'` or use the DCP backend."
+            f"Install with: {DEEP_INSTALL_HINT}"
         ) from exc
 
     device, use_fp16 = _select_device()
@@ -119,7 +120,9 @@ def predict_vascx(
     - 2: vein
     - 3: crossing
     """
-    image_rgb = _normalize_rgb_uint8(image_rgb)
+    require_deep_learning("VascX vessel segmentation")
+
+    image_rgb = normalize_rgb_uint8(image_rgb)
     image_pil = Image.fromarray(image_rgb)
     shape = image_rgb.shape[:2]
 

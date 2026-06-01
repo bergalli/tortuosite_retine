@@ -31,5 +31,9 @@ tortuosite_score/vessels_detection/__init__.py
 tortuosite_score/vessels_detection/analyse.py
 tortuosite_score/vessels_detection/data_load.py
 tortuosite_score/vessels_detection/deep_model.py
+tortuosite_score/vessels_detection/dl_extra.py
+tortuosite_score/vessels_detection/image_utils.py
 tortuosite_score/vessels_detection/main.py
+tortuosite_score/vessels_detection/skan_extra.py
+tortuosite_score/vessels_detection/skeleton_graph.py
 tortuosite_score/vessels_detection/vascx_model.py

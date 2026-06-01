@@ -15,7 +15,8 @@ from skimage.morphology import (
     remove_small_objects,
     remove_small_holes,
 )
-from skan import Skeleton, summarize
+from tortuosite_score.vessels_detection.skan_extra import skan_available
+from tortuosite_score.vessels_detection.skeleton_graph import summarize_skeleton_branches
 
 
 def detect_vessels(image: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
@@ -119,17 +120,22 @@ def skeletonize_mask(binary: np.ndarray) -> np.ndarray:
 
 def analyze_skeleton_tortuosity(skeleton: np.ndarray) -> pd.DataFrame:
     """
-    Analyse du squelette avec skan.
+    Analyse du squelette (skan si installé, sinon graphe scikit-image).
 
     Cela remplace partiellement :
         run("Analyze Skeleton (2D/3D)", ...)
 
-    Colonnes importantes selon skan :
+    Colonnes importantes :
     - branch-distance : longueur réelle le long du squelette
     - euclidean-distance : distance droite entre début et fin de branche
     """
-    skel = Skeleton(skeleton)
-    summary = summarize(skel, separator="-")
+    if skan_available():
+        from skan import Skeleton, summarize
+
+        skel = Skeleton(skeleton)
+        summary = summarize(skel, separator="-")
+    else:
+        summary = summarize_skeleton_branches(skeleton)
 
     # Sécurité : éviter division par zéro
     summary = summary.copy()

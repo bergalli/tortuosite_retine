@@ -6,6 +6,10 @@ import pandas as pd
 import streamlit as st
 
 from tortuosite_score.app.review_data import read_json
+from tortuosite_score.vessels_detection.dl_extra import (
+    DEEP_INSTALL_HINT,
+    deep_learning_available,
+)
 
 
 def render_sidebar_run_setup() -> dict:
@@ -16,12 +20,19 @@ def render_sidebar_run_setup() -> dict:
             type=["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
             help="Upload a fundus image to generate a vessel skeleton for manual review.",
         )
+        deep_available = deep_learning_available()
+        method_options = ["deep", "classical"] if deep_available else ["classical"]
         method = st.selectbox(
             "Segmentation method",
-            options=["deep", "classical"],
+            options=method_options,
             index=0,
             help="Choose the segmentation mode used to generate the review skeleton.",
         )
+        if not deep_available:
+            st.info(
+                "Deep learning backends are not installed. "
+                f"Install them with `{DEEP_INSTALL_HINT}`."
+            )
 
         if method == "deep":
             deep_backend = st.selectbox(

@@ -21,7 +21,9 @@ import zipfile
 
 import cv2
 import numpy as np
-from huggingface_hub import snapshot_download
+
+from tortuosite_score.vessels_detection.dl_extra import DEEP_INSTALL_HINT, require_deep_learning
+from tortuosite_score.vessels_detection.image_utils import normalize_rgb_uint8
 
 
 DCP_REPO_ZIP_URL = "https://github.com/ruc-aimc-lab/dcp/archive/refs/heads/main.zip"
@@ -30,32 +32,6 @@ DCP_SOURCE_DIR = PACKAGE_ROOT / "external_models" / "dcp"
 DCP_CHECKPOINT_DIR = PACKAGE_ROOT / "external_models" / "UNet_DCP_1024"
 
 _DCP_ENGINE = None
-
-
-def _normalize_rgb_uint8(image: np.ndarray) -> np.ndarray:
-    """
-    Garantit une image RGB uint8.
-    """
-    if image.ndim == 2:
-        image = np.stack([image, image, image], axis=-1)
-
-    if image.shape[2] == 4:
-        image = image[:, :, :3]
-
-    if image.dtype == np.uint8:
-        return image
-
-    image = image.astype(np.float32)
-    min_val = float(np.nanmin(image))
-    max_val = float(np.nanmax(image))
-
-    if max_val <= min_val:
-        return np.zeros_like(image, dtype=np.uint8)
-
-    image = (image - min_val) / (max_val - min_val)
-    image = np.clip(image * 255.0, 0, 255)
-
-    return image.astype(np.uint8)
 
 
 def _download_dcp_source() -> Path:
@@ -109,6 +85,14 @@ def _download_dcp_checkpoint() -> Path:
     """
     Télécharge le checkpoint Hugging Face.
     """
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "DCP checkpoint download requires huggingface-hub. "
+            f"Install with: {DEEP_INSTALL_HINT}"
+        ) from exc
+
     print("[DCP] Vérification / téléchargement du checkpoint UNet_DCP_1024...")
 
     model_dir = snapshot_download(
@@ -221,7 +205,9 @@ def predict_vessels_deep(
             f"Modalités possibles : {sorted(valid_modalities)}"
         )
 
-    image_rgb = _normalize_rgb_uint8(image_rgb)
+    require_deep_learning("DCP vessel segmentation")
+
+    image_rgb = normalize_rgb_uint8(image_rgb)
     original_h, original_w = image_rgb.shape[:2]
 
     engine = _get_dcp_engine()

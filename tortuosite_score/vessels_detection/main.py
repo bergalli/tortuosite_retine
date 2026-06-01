@@ -28,8 +28,10 @@ from tortuosite_score.vessels_detection.analyse import (
     analyze_skeleton_tortuosity,
     select_first_significant_branches,
 )
-from tortuosite_score.vessels_detection.deep_model import predict_vessels_deep
-from tortuosite_score.vessels_detection.vascx_model import predict_vascx
+from tortuosite_score.vessels_detection.dl_extra import (
+    deep_learning_available,
+    require_deep_learning,
+)
 
 
 def save_intermediate_image(
@@ -260,6 +262,10 @@ def run_pipeline(
     vein_binary = None
     disc_mask = None
     if method == "deep":
+        require_deep_learning()
+        from tortuosite_score.vessels_detection.deep_model import predict_vessels_deep
+        from tortuosite_score.vessels_detection.vascx_model import predict_vascx
+
         normalized_backend = deep_backend.strip().upper()
         if normalized_backend == "DCP":
             print("Méthode utilisée : deep learning DCP")
@@ -477,7 +483,7 @@ def parse_args():
     parser.add_argument(
         "--method",
         choices=["deep", "classical"],
-        default="deep",
+        default="deep" if deep_learning_available() else "classical",
     )
 
     parser.add_argument(

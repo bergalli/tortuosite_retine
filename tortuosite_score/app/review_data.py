@@ -12,11 +12,12 @@ import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
-from skan import Skeleton
 
 from tortuosite_score.app.constants import RUNS_ROOT
 from tortuosite_score.vessels_detection.analyse import skeletonize_mask
 from tortuosite_score.vessels_detection.main import run_pipeline
+from tortuosite_score.vessels_detection.skan_extra import skan_available
+from tortuosite_score.vessels_detection.skeleton_graph import skeleton_graph_from_image
 
 
 def _path_endpoint_signature(points: list[list[int]]) -> tuple[tuple[int, int], tuple[int, int]] | None:
@@ -99,7 +100,12 @@ def load_review_bundle(run_dir_str: str) -> dict:
         skeleton = skeletonize_mask(cleaned_artery > 0) | skeletonize_mask(cleaned_vein > 0)
     else:
         skeleton = skeletonize_mask(cleaned_mask > 0)
-    skeleton_graph = Skeleton(skeleton)
+    if skan_available():
+        from skan import Skeleton
+
+        skeleton_graph = Skeleton(skeleton)
+    else:
+        skeleton_graph = skeleton_graph_from_image(skeleton)
 
     summary_path = output_dir / "08_full_skeleton_summary.csv"
     branches_df = pd.read_csv(summary_path).copy()
