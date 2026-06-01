@@ -70,6 +70,53 @@ def segment_refs_for_review_state(review_state: dict) -> list[str]:
     return sorted_unique_refs(review_state.get("selected_segment_refs", []))
 
 
+def normalize_selection_refs(segment_refs: list[str]) -> list[str]:
+    return sorted_unique_refs(segment_refs)
+
+
+def push_selection_history(
+    undo_stack: list[list[str]],
+    redo_stack: list[list[str]],
+    previous_refs: list[str],
+    next_refs: list[str],
+    limit: int,
+) -> bool:
+    previous_normalized = normalize_selection_refs(previous_refs)
+    next_normalized = normalize_selection_refs(next_refs)
+    if previous_normalized == next_normalized:
+        return False
+    undo_stack.append(previous_normalized)
+    del undo_stack[:-limit]
+    redo_stack.clear()
+    return True
+
+
+def undo_selection(
+    undo_stack: list[list[str]],
+    redo_stack: list[list[str]],
+    current_refs: list[str],
+) -> list[str]:
+    current_normalized = normalize_selection_refs(current_refs)
+    if not undo_stack:
+        return current_normalized
+    previous_refs = normalize_selection_refs(undo_stack.pop())
+    redo_stack.append(current_normalized)
+    return previous_refs
+
+
+def redo_selection(
+    undo_stack: list[list[str]],
+    redo_stack: list[list[str]],
+    current_refs: list[str],
+) -> list[str]:
+    current_normalized = normalize_selection_refs(current_refs)
+    if not redo_stack:
+        return current_normalized
+    next_refs = normalize_selection_refs(redo_stack.pop())
+    undo_stack.append(current_normalized)
+    return next_refs
+
+
 def next_manual_segment_id(review_state: dict) -> int:
     existing = [int(raw_id) for raw_id in review_state.get("manual_segments", {})]
     return max(existing, default=0) + 1
@@ -357,4 +404,3 @@ parse_branch_ref = parse_segment_ref
 remove_manual_branch = remove_manual_segment
 split_branch_refs = split_segment_refs
 upsert_manual_branch = upsert_manual_segment
-

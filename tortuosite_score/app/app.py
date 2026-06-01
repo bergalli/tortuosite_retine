@@ -16,14 +16,18 @@ from tortuosite_score.app.review_state import (
     build_vessel_scores_table,
     get_or_create_review_state,
     next_default_vessel_name,
+    normalize_selection_refs,
     parse_segment_ref,
     persist_manual_review,
+    push_selection_history,
+    redo_selection,
     remove_manual_segment,
     score_vessel,
     segment_ref_sort_key,
     segment_refs_for_review_state,
     segment_refs_for_vessel,
     synthesize_selection_links,
+    undo_selection,
     upsert_manual_segment,
 )
 from tortuosite_score.app.ui_sections import render_debug_tab, render_sidebar_run_setup
@@ -33,6 +37,10 @@ from tortuosite_score.app.viewer_component import (
     build_vessel_labels,
     build_viewer_branches,
 )
+
+VIEWER_SELECTION_MODE_KEY = "viewer_selection_mode"
+VIEWER_INTERACTION_MODE_KEY = "viewer_interaction_mode"
+SELECTION_HISTORY_LIMIT = 50
 
 
 st.set_page_config(page_title="Tortuosite Retine", layout="wide")
@@ -85,8 +93,102 @@ def _render_run_selector() -> str | None:
     return selected_run_name
 
 
+def _selection_history_keys(selected_run_name: str) -> tuple[str, str]:
+    return f"selection_undo::{selected_run_name}", f"selection_redo::{selected_run_name}"
+
+
+def _selection_history_stacks(undo_key: str, redo_key: str) -> tuple[list[list[str]], list[list[str]]]:
+    st.session_state.setdefault(undo_key, [])
+    st.session_state.setdefault(redo_key, [])
+    return st.session_state[undo_key], st.session_state[redo_key]
+
+
+def _clear_selection_history(undo_key: str, redo_key: str) -> None:
+    undo_stack, redo_stack = _selection_history_stacks(undo_key, redo_key)
+    undo_stack.clear()
+    redo_stack.clear()
+
+
+def _set_selected_segment_refs(
+    review_state: dict,
+    next_refs: list[str],
+    undo_key: str,
+    redo_key: str,
+    viewer_reset_key: str | None = None,
+) -> bool:
+    previous_refs = segment_refs_for_review_state(review_state)
+    normalized_next = normalize_selection_refs(next_refs)
+    undo_stack, redo_stack = _selection_history_stacks(undo_key, redo_key)
+    changed = push_selection_history(
+        undo_stack,
+        redo_stack,
+        previous_refs,
+        normalized_next,
+        SELECTION_HISTORY_LIMIT,
+    )
+    if not changed:
+        return False
+    review_state["selected_segment_refs"] = normalized_next
+    if viewer_reset_key is not None:
+        st.session_state[viewer_reset_key] += 1
+    return True
+
+
+def _record_existing_selection_change(
+    review_state: dict,
+    previous_refs: list[str],
+    undo_key: str,
+    redo_key: str,
+    viewer_reset_key: str | None = None,
+) -> bool:
+    next_refs = segment_refs_for_review_state(review_state)
+    undo_stack, redo_stack = _selection_history_stacks(undo_key, redo_key)
+    changed = push_selection_history(
+        undo_stack,
+        redo_stack,
+        previous_refs,
+        next_refs,
+        SELECTION_HISTORY_LIMIT,
+    )
+    if changed and viewer_reset_key is not None:
+        st.session_state[viewer_reset_key] += 1
+    return changed
+
+
+def _render_selection_history_controls(
+    review_state: dict,
+    undo_key: str,
+    redo_key: str,
+    viewer_reset_key: str,
+) -> None:
+    undo_stack, redo_stack = _selection_history_stacks(undo_key, redo_key)
+    undo_col, redo_col, count_col = st.columns([1.0, 1.0, 2.5], vertical_alignment="center")
+    with undo_col:
+        if st.button("Undo", disabled=not undo_stack, use_container_width=True):
+            review_state["selected_segment_refs"] = undo_selection(
+                undo_stack,
+                redo_stack,
+                segment_refs_for_review_state(review_state),
+            )
+            st.session_state[viewer_reset_key] += 1
+            st.rerun()
+    with redo_col:
+        if st.button("Redo", disabled=not redo_stack, use_container_width=True):
+            review_state["selected_segment_refs"] = redo_selection(
+                undo_stack,
+                redo_stack,
+                segment_refs_for_review_state(review_state),
+            )
+            st.session_state[viewer_reset_key] += 1
+            st.rerun()
+    with count_col:
+        st.caption(f"{len(undo_stack)} undo step(s), {len(redo_stack)} redo step(s)")
+
+
 def _clear_vessel_draft(
     review_state: dict,
+    undo_key: str,
+    redo_key: str,
     editing_vessel_name_key: str,
     editing_original_snapshot_key: str,
     vessel_name_reset_key: str,
@@ -95,7 +197,7 @@ def _clear_vessel_draft(
     end_endpoint_key: str,
     next_endpoint_target_key: str,
 ) -> None:
-    review_state["selected_segment_refs"] = []
+    _set_selected_segment_refs(review_state, [], undo_key, redo_key)
     st.session_state.pop(editing_vessel_name_key, None)
     st.session_state.pop(editing_original_snapshot_key, None)
     st.session_state.pop(start_endpoint_key, None)
@@ -108,6 +210,8 @@ def _clear_vessel_draft(
 def _start_vessel_edit(
     vessel_name: str,
     review_state: dict,
+    undo_key: str,
+    redo_key: str,
     editing_vessel_name_key: str,
     editing_original_snapshot_key: str,
     vessel_name_key: str,
@@ -116,7 +220,7 @@ def _start_vessel_edit(
     end_endpoint_key: str,
 ) -> None:
     vessel = review_state["vessels"][vessel_name]
-    review_state["selected_segment_refs"] = segment_refs_for_vessel(vessel)
+    _set_selected_segment_refs(review_state, segment_refs_for_vessel(vessel), undo_key, redo_key)
     st.session_state[editing_vessel_name_key] = vessel_name
     st.session_state[editing_original_snapshot_key] = {
         "name": vessel_name,
@@ -181,14 +285,15 @@ def _sync_viewer_state(
     review_state: dict,
     selected_run_dir,
     branches_df: pd.DataFrame,
+    undo_key: str,
+    redo_key: str,
     viewer_reset_key: str,
     redraw_target_ref: str | None,
 ) -> None:
     next_selection = getattr(viewer_result, "selected_segment_refs", None)
     if next_selection is not None:
-        normalized = sorted({str(segment_ref) for segment_ref in next_selection}, key=segment_ref_sort_key)
-        if normalized != segment_refs_for_review_state(review_state):
-            review_state["selected_segment_refs"] = normalized
+        normalized = normalize_selection_refs([str(segment_ref) for segment_ref in next_selection])
+        if _set_selected_segment_refs(review_state, normalized, undo_key, redo_key):
             st.rerun()
 
     draw_action = getattr(viewer_result, "draw_action", None)
@@ -204,7 +309,7 @@ def _sync_viewer_state(
         else:
             current = [ref for ref in review_state["selected_segment_refs"] if ref != redraw_target_ref]
             current.append(updated_ref)
-            review_state["selected_segment_refs"] = sorted(set(current), key=segment_ref_sort_key)
+            _set_selected_segment_refs(review_state, current, undo_key, redo_key)
             persist_manual_review(selected_run_dir, review_state, branches_df)
         st.session_state[viewer_reset_key] += 1
         st.rerun()
@@ -216,7 +321,7 @@ def _sync_viewer_state(
         else:
             current = list(review_state["selected_segment_refs"])
             current.append(created_ref)
-            review_state["selected_segment_refs"] = sorted(set(current), key=segment_ref_sort_key)
+            _set_selected_segment_refs(review_state, current, undo_key, redo_key)
             persist_manual_review(selected_run_dir, review_state, branches_df)
         st.session_state[viewer_reset_key] += 1
         st.rerun()
@@ -256,28 +361,31 @@ def _render_viewer_controls() -> dict[str, object]:
         show_skeleton = st.toggle("Show skeleton", value=True)
         show_labels = st.toggle("Show segment IDs", value=False)
         show_vessel_labels = st.toggle("Show vessel IDs", value=False)
-        selection_mode = st.radio(
-            "Click selection",
-            options=["Segment parts", "Whole vessels"],
-            horizontal=True,
-            help="Whole vessels selects every segment from the saved vessel you click.",
-        )
-        interaction_mode_label = st.radio(
-            "Interaction mode",
-            options=["Select", "Draw new", "Redraw selected"],
-            horizontal=True,
-        )
         base_opacity = st.slider("Base image opacity", 0.0, 1.0, 0.95, 0.05)
 
+    st.session_state.setdefault(VIEWER_SELECTION_MODE_KEY, "Segment parts")
+    st.session_state.setdefault(VIEWER_INTERACTION_MODE_KEY, "Select")
+    if st.session_state[VIEWER_INTERACTION_MODE_KEY] not in {"Select", "Draw new"}:
+        st.session_state[VIEWER_INTERACTION_MODE_KEY] = "Select"
     return {
         "show_base_image": show_base_image,
         "show_skeleton": show_skeleton,
         "show_labels": show_labels,
         "show_vessel_labels": show_vessel_labels,
-        "selection_mode": selection_mode,
-        "interaction_mode_label": interaction_mode_label,
+        "selection_mode": st.session_state[VIEWER_SELECTION_MODE_KEY],
+        "interaction_mode_label": st.session_state[VIEWER_INTERACTION_MODE_KEY],
         "base_opacity": base_opacity,
     }
+
+
+def _render_image_interaction_controls() -> None:
+    with st.container(border=True):
+        st.radio(
+            "Interaction mode",
+            options=["Select", "Draw new"],
+            horizontal=True,
+            key=VIEWER_INTERACTION_MODE_KEY,
+        )
 
 
 @st.fragment
@@ -300,6 +408,8 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
     start_endpoint_key = f"vessel_start_endpoint::{selected_run_name}"
     end_endpoint_key = f"vessel_end_endpoint::{selected_run_name}"
     next_endpoint_target_key = f"next_endpoint_target::{selected_run_name}"
+    selection_undo_key, selection_redo_key = _selection_history_keys(selected_run_name)
+    _selection_history_stacks(selection_undo_key, selection_redo_key)
 
     if st.session_state.get(vessel_name_reset_key):
         st.session_state[vessel_name_key] = ""
@@ -315,6 +425,8 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
         _start_vessel_edit(
             pending_vessel_edit,
             review_state,
+            selection_undo_key,
+            selection_redo_key,
             editing_vessel_name_key,
             editing_original_snapshot_key,
             vessel_name_key,
@@ -327,6 +439,8 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
     if editing_vessel_name and editing_vessel_name not in review_state["vessels"]:
         _clear_vessel_draft(
             review_state,
+            selection_undo_key,
+            selection_redo_key,
             editing_vessel_name_key,
             editing_original_snapshot_key,
             vessel_name_reset_key,
@@ -348,8 +462,6 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
 
     selected_segment_refs = segment_refs_for_review_state(review_state)
     redraw_target_ref = _single_manual_selection_ref(selected_segment_refs)
-    if interaction_mode_label == "Redraw selected" and redraw_target_ref is None:
-        st.info("Select exactly one manual segment before using redraw mode.")
 
     provisional_resolution = (
         synthesize_selection_links(branches_df, review_state["manual_segments"], selected_segment_refs)
@@ -363,7 +475,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
         allow_reuse_assigned=True,
         provisional_synthetic_links=provisional_resolution["synthetic_links"],
     )
-    interaction_mode = {"Select": "select", "Draw new": "draw", "Redraw selected": "redraw"}[interaction_mode_label]
+    interaction_mode = {"Select": "select", "Draw new": "draw"}[interaction_mode_label]
     selected_start_endpoint = st.session_state.get(start_endpoint_key)
     selected_end_endpoint = st.session_state.get(end_endpoint_key)
     endpoint_segments = [
@@ -380,6 +492,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
         endpoint_col = None
 
     with viewer_col:
+        _render_selection_history_controls(review_state, selection_undo_key, selection_redo_key, viewer_reset_key)
         viewer_result = BRANCH_VIEWER(
             data={
                 "imageUrl": bundle["image_url"],
@@ -402,11 +515,14 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
             width="stretch",
             height=720,
         )
+        _render_image_interaction_controls()
     _sync_viewer_state(
         viewer_result,
         review_state,
         selected_run_dir,
         branches_df,
+        selection_undo_key,
+        selection_redo_key,
         viewer_reset_key,
         redraw_target_ref,
     )
@@ -471,9 +587,16 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
         with delete_col:
             if st.button("Delete selected manual segment", use_container_width=True):
                 _, manual_segment_id = parse_segment_ref(redraw_target_ref)
+                previous_refs = segment_refs_for_review_state(review_state)
                 remove_manual_segment(review_state, manual_segment_id)
+                _record_existing_selection_change(
+                    review_state,
+                    previous_refs,
+                    selection_undo_key,
+                    selection_redo_key,
+                    viewer_reset_key,
+                )
                 persist_manual_review(selected_run_dir, review_state, branches_df)
-                st.session_state[viewer_reset_key] += 1
                 st.rerun()
         with clear_endpoint_col:
             if st.button("Clear picked endpoints", use_container_width=True):
@@ -498,6 +621,8 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
             vessel_category_key,
             vessel_name_reset_key,
             viewer_reset_key,
+            selection_undo_key,
+            selection_redo_key,
             editing_vessel_name_key,
             editing_original_snapshot_key,
             start_endpoint_key,
@@ -513,6 +638,8 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
             vessel_load_key,
             pending_edit_key,
             viewer_reset_key,
+            selection_undo_key,
+            selection_redo_key,
             editing_vessel_name_key,
             editing_original_snapshot_key,
             vessel_name_reset_key,
@@ -546,6 +673,8 @@ def _render_vessel_draft(
     vessel_category_key: str,
     vessel_name_reset_key: str,
     viewer_reset_key: str,
+    undo_key: str,
+    redo_key: str,
     editing_vessel_name_key: str,
     editing_original_snapshot_key: str,
     start_endpoint_key: str,
@@ -588,6 +717,8 @@ def _render_vessel_draft(
         review_state["vessels"][clean_name] = payload
         _clear_vessel_draft(
             review_state,
+            undo_key,
+            redo_key,
             editing_vessel_name_key,
             editing_original_snapshot_key,
             vessel_name_reset_key,
@@ -624,6 +755,8 @@ def _render_vessel_draft(
             if st.button("Cancel edit", use_container_width=True):
                 _clear_vessel_draft(
                     review_state,
+                    undo_key,
+                    redo_key,
                     editing_vessel_name_key,
                     editing_original_snapshot_key,
                     vessel_name_reset_key,
@@ -649,6 +782,7 @@ def _render_vessel_draft(
         with reset_col:
             if st.button("Clear draft selection", use_container_width=True):
                 review_state["selected_segment_refs"] = []
+                _clear_selection_history(undo_key, redo_key)
                 st.session_state[viewer_reset_key] += 1
                 st.rerun()
 
@@ -662,6 +796,8 @@ def _render_vessel_draft(
         vessel_name,
         vessel_name_reset_key,
         viewer_reset_key,
+        undo_key,
+        redo_key,
         editing_vessel_name_key,
         editing_original_snapshot_key,
         start_endpoint_key,
@@ -680,6 +816,8 @@ def _render_merge_controls(
     vessel_name: str,
     vessel_name_reset_key: str,
     viewer_reset_key: str,
+    undo_key: str,
+    redo_key: str,
     editing_vessel_name_key: str,
     editing_original_snapshot_key: str,
     start_endpoint_key: str,
@@ -691,7 +829,7 @@ def _render_merge_controls(
         f"Merge {len(selected_complete_vessels)} selected vessels" if merge_ready else "Merge selected vessels",
         disabled=not merge_ready,
         use_container_width=True,
-        help="Select at least two complete saved vessels, usually with Whole vessels mode.",
+        help="Select at least two complete saved vessels.",
     ):
         return
     merged_refs = sorted(
@@ -727,6 +865,8 @@ def _render_merge_controls(
     review_state["vessels"][clean_name] = payload
     _clear_vessel_draft(
         review_state,
+        undo_key,
+        redo_key,
         editing_vessel_name_key,
         editing_original_snapshot_key,
         vessel_name_reset_key,
@@ -749,6 +889,8 @@ def _render_saved_vessels(
     vessel_load_key: str,
     pending_edit_key: str,
     viewer_reset_key: str,
+    undo_key: str,
+    redo_key: str,
     editing_vessel_name_key: str,
     editing_original_snapshot_key: str,
     vessel_name_reset_key: str,
@@ -771,8 +913,7 @@ def _render_saved_vessels(
         if st.button("Add to selection", use_container_width=True):
             current = set(review_state["selected_segment_refs"])
             current.update(segment_refs_for_vessel(review_state["vessels"][vessel_to_load]))
-            review_state["selected_segment_refs"] = sorted(current, key=segment_ref_sort_key)
-            st.session_state[viewer_reset_key] += 1
+            _set_selected_segment_refs(review_state, list(current), undo_key, redo_key, viewer_reset_key)
             st.rerun()
     with delete_col:
         if st.button("Delete saved vessel", use_container_width=True):
@@ -780,7 +921,7 @@ def _render_saved_vessels(
             if st.session_state.get(editing_vessel_name_key) == vessel_to_load:
                 st.session_state.pop(editing_vessel_name_key, None)
                 st.session_state.pop(editing_original_snapshot_key, None)
-            review_state["selected_segment_refs"] = []
+            _set_selected_segment_refs(review_state, [], undo_key, redo_key)
             st.session_state[vessel_name_reset_key] = True
             st.session_state[viewer_reset_key] += 1
             persist_manual_review(selected_run_dir, review_state, branches_df)

@@ -15,6 +15,11 @@ from tortuosite_score.vessels_detection.segments import (
     split_segment_refs,
     synthesize_segment_links,
 )
+from tortuosite_score.app.review_state import (
+    push_selection_history,
+    redo_selection,
+    undo_selection,
+)
 
 
 class VesselSegmentTests(unittest.TestCase):
@@ -117,6 +122,53 @@ class VesselSegmentTests(unittest.TestCase):
         self.assertEqual(len(resolution["synthetic_links"]), 1)
         self.assertTrue(math.isclose(score["length"], 30.0))
         self.assertTrue(math.isclose(score["chord"], 30.0))
+
+
+class SelectionHistoryTests(unittest.TestCase):
+    def test_push_records_previous_selection_and_clears_redo(self) -> None:
+        undo_stack = [["model:9"]]
+        redo_stack = [["model:3"]]
+
+        changed = push_selection_history(undo_stack, redo_stack, ["model:2"], ["model:2", "manual:1"], 50)
+
+        self.assertTrue(changed)
+        self.assertEqual(undo_stack, [["model:9"], ["model:2"]])
+        self.assertEqual(redo_stack, [])
+
+    def test_push_ignores_duplicate_selection(self) -> None:
+        undo_stack: list[list[str]] = []
+        redo_stack = [["model:3"]]
+
+        changed = push_selection_history(undo_stack, redo_stack, ["manual:1", "model:2"], ["model:2", "manual:1"], 50)
+
+        self.assertFalse(changed)
+        self.assertEqual(undo_stack, [])
+        self.assertEqual(redo_stack, [["model:3"]])
+
+    def test_undo_and_redo_move_between_stacks(self) -> None:
+        undo_stack = [[], ["model:2"]]
+        redo_stack: list[list[str]] = []
+
+        restored = undo_selection(undo_stack, redo_stack, ["model:2", "manual:1"])
+
+        self.assertEqual(restored, ["model:2"])
+        self.assertEqual(undo_stack, [[]])
+        self.assertEqual(redo_stack, [["model:2", "manual:1"]])
+
+        redone = redo_selection(undo_stack, redo_stack, restored)
+
+        self.assertEqual(redone, ["model:2", "manual:1"])
+        self.assertEqual(undo_stack, [[], ["model:2"]])
+        self.assertEqual(redo_stack, [])
+
+    def test_new_selection_after_undo_clears_redo(self) -> None:
+        undo_stack = [[]]
+        redo_stack = [["model:2", "manual:1"]]
+
+        push_selection_history(undo_stack, redo_stack, ["model:2"], ["model:4"], 50)
+
+        self.assertEqual(undo_stack, [[], ["model:2"]])
+        self.assertEqual(redo_stack, [])
 
 
 if __name__ == "__main__":
