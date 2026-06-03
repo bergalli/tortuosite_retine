@@ -245,7 +245,7 @@ def run_uploaded_analysis(
 
     log_buffer = io.StringIO()
 
-    with st.spinner("Running segmentation and skeleton extraction..."):
+    with st.spinner("Segmentation et extraction du squelette en cours..."):
         with redirect_stdout(log_buffer):
             run_pipeline(
                 image_path=str(image_path),

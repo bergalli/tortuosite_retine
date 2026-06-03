@@ -14,75 +14,76 @@ from tortuosite_score.vessels_detection.dl_extra import (
 
 def render_sidebar_run_setup() -> dict:
     with st.sidebar:
-        st.header("Run setup")
+        st.header("Configuration de la session")
         uploaded_file = st.file_uploader(
-            "Retinal image",
+            "Image retinienne",
             type=["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
-            help="Upload a fundus image to generate a vessel skeleton for manual review.",
+            help="Importez une image du fond d'oeil pour generer un squelette vasculaire a revoir manuellement.",
         )
         deep_available = deep_learning_available()
         method_options = ["deep", "classical"] if deep_available else ["classical"]
         method = st.selectbox(
-            "Segmentation method",
+            "Methode de segmentation",
             options=method_options,
             index=0,
-            help="Choose the segmentation mode used to generate the review skeleton.",
+            format_func=lambda value: "Apprentissage profond" if value == "deep" else "Classique",
+            help="Choisissez le mode de segmentation utilise pour generer le squelette a revoir.",
         )
         if not deep_available:
             st.info(
-                "Deep learning backends are not installed. "
-                f"Install them with `{DEEP_INSTALL_HINT}`."
+                "Les moteurs d'apprentissage profond ne sont pas installes. "
+                f"Installez-les avec `{DEEP_INSTALL_HINT}`."
             )
 
         if method == "deep":
             deep_backend = st.selectbox(
-                "Deep backend",
+                "Moteur profond",
                 options=["VascX", "DCP"],
                 index=0,
-                help="VascX adds artery/vein and optic-disc segmentation; DCP is the original fallback.",
+                help="VascX ajoute la segmentation artere/veine et disque optique; DCP est le repli d'origine.",
             )
             deep_threshold = st.slider(
-                "Deep threshold",
+                "Seuil profond",
                 0.0,
                 1.0,
                 0.30,
                 0.01,
-                help="Probability cutoff applied to the neural segmentation.",
+                help="Seuil de probabilite applique a la segmentation neuronale.",
                 disabled=deep_backend == "VascX",
             )
             deep_modality = st.selectbox(
-                "Deep modality",
+                "Modalite profonde",
                 options=["CFP", "UWF", "FFA", "SLO", "OCTA"],
                 index=0,
                 disabled=deep_backend == "VascX",
             )
             if deep_backend == "VascX":
                 vascx_av_size = st.select_slider(
-                    "VascX artery/vein input size",
+                    "Taille entree arteres/veines VascX",
                     options=[512, 768, 1024, 1280],
                     value=1024,
-                    help="Larger values can preserve finer vessels but take more memory and time.",
+                    help="Des valeurs plus grandes preservent mieux les petits vaisseaux mais demandent plus de memoire et de temps.",
                 )
                 vascx_use_contrast_enhancement = st.toggle(
-                    "VascX contrast enhancement",
+                    "Renforcement du contraste VascX",
                     value=True,
-                    help="Use VascX fundus contrast enhancement before inference.",
+                    help="Utiliser le renforcement du contraste VascX avant l'inference.",
                 )
                 vascx_min_object_size = st.slider(
-                    "VascX cleanup min object size",
+                    "Taille minimale de nettoyage VascX",
                     0,
                     100,
                     12,
                     1,
-                    help="Remove smaller connected components after artery/vein segmentation.",
+                    help="Supprimer les petites composantes connexes apres la segmentation artere/veine.",
                 )
                 vascx_closing_radius = st.slider(
-                    "VascX cleanup closing radius",
+                    "Rayon de fermeture VascX",
                     0,
                     4,
                     1,
                     1,
-                    help="Connect tiny gaps after artery/vein segmentation.",
+                    help="Refermer les petits trous apres la segmentation artere/veine.",
                 )
                 vascx_auto_create_vessels = False
                 vascx_auto_min_vessel_length = 25.0
@@ -96,8 +97,8 @@ def render_sidebar_run_setup() -> dict:
             vessel_percentile = 95.0
             vessel_low_percentile = 90.0
         else:
-            vessel_percentile = st.slider("Vessel percentile", 50.0, 99.9, 95.0, 0.1)
-            vessel_low_percentile = st.slider("Vessel low percentile", 0.0, 99.0, 90.0, 0.1)
+            vessel_percentile = st.slider("Percentile vaisseaux", 50.0, 99.9, 95.0, 0.1)
+            vessel_low_percentile = st.slider("Percentile bas vaisseaux", 0.0, 99.0, 90.0, 0.1)
             deep_threshold = 0.30
             deep_modality = "CFP"
             deep_backend = "DCP"
@@ -109,7 +110,7 @@ def render_sidebar_run_setup() -> dict:
             vascx_auto_min_vessel_length = 25.0
 
         run_btn = st.button(
-            "Run segmentation",
+            "Lancer la segmentation",
             type="primary",
             disabled=uploaded_file is None,
             use_container_width=True,
@@ -136,29 +137,29 @@ def render_sidebar_run_setup() -> dict:
 def render_debug_tab(run_dir: Path) -> None:
     metadata_path = run_dir / "metadata.json"
     if metadata_path.exists():
-        st.subheader("Run metadata")
+        st.subheader("Metadonnees de la session")
         st.json(read_json(metadata_path), expanded=False)
 
     manual_csv = run_dir / "manual_vessels.csv"
     if manual_csv.exists():
-        st.subheader("Saved manual vessels")
+        st.subheader("Vaisseaux manuels sauvegardes")
         st.dataframe(pd.read_csv(manual_csv), use_container_width=True)
 
     results_csv = run_dir / "results.csv"
     if results_csv.exists():
-        st.subheader("Legacy auto-selection output")
+        st.subheader("Sortie historique de selection automatique")
         st.dataframe(pd.read_csv(results_csv), use_container_width=True)
 
     logs_path = run_dir / "logs.txt"
     if logs_path.exists():
         logs = logs_path.read_text(encoding="utf-8").strip()
         if logs:
-            st.subheader("Run logs")
+            st.subheader("Journaux de session")
             st.code(logs, language="text")
 
     output_dir = run_dir / "output"
     image_files = sorted(output_dir.glob("*.png"))
     if image_files:
-        st.subheader("Intermediate outputs")
+        st.subheader("Sorties intermediaires")
         for image_file in image_files:
             st.image(str(image_file), caption=image_file.name, use_container_width=True)

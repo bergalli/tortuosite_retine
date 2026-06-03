@@ -286,11 +286,11 @@ def build_selection_table(
             {
                 "Segment": segment_ref,
                 "Source": segment["source"],
-                "Length": segment["path_length"],
-                "Chord": segment["chord_length"],
-                "Tortuosity": segment["tortuosity"],
+                "Longueur": segment["path_length"],
+                "Corde": segment["chord_length"],
+                "Tortuosite": segment["tortuosity"],
                 "Type": segment["branch_type"],
-                "Label": segment["vascx_category"],
+                "Categorie": segment["vascx_category"],
             }
         )
     return pd.DataFrame(rows)
@@ -303,19 +303,19 @@ def build_vessel_scores_table(review_state: dict, branches_df: pd.DataFrame) -> 
         metrics = score_vessel(branches_df, manual_segments, vessel)
         rows.append(
             {
-                "Vessel": vessel_name,
-                "Category": vessel.get("category", "artere"),
-                "Start": _endpoint_caption(metrics["start_endpoint"]),
-                "End": _endpoint_caption(metrics["end_endpoint"]),
-                "Model segments": metrics["model_segment_count"],
-                "Manual segments": metrics["manual_segment_count"],
+                "Vaisseau": vessel_name,
+                "Categorie": vessel.get("category", "artere"),
+                "Debut": _endpoint_caption(metrics["start_endpoint"]),
+                "Fin": _endpoint_caption(metrics["end_endpoint"]),
+                "Segments modele": metrics["model_segment_count"],
+                "Segments manuels": metrics["manual_segment_count"],
                 "Segments": metrics["segment_count"],
-                "Components": metrics["component_count"],
-                "Auto bridges": metrics["bridge_branch_count"],
-                "Bridge status": "connected" if metrics["bridge_success"] else "partial",
-                "Path length": metrics["length"],
-                "Chord": metrics["chord"],
-                "Tortuosity": metrics["tortuosity"],
+                "Composantes": metrics["component_count"],
+                "Ponts automatiques": metrics["bridge_branch_count"],
+                "Statut du pont": "connecte" if metrics["bridge_success"] else "partiel",
+                "Longueur du trajet": metrics["length"],
+                "Corde": metrics["chord"],
+                "Tortuosite": metrics["tortuosity"],
             }
         )
     return pd.DataFrame(rows)
@@ -379,7 +379,7 @@ def _normalize_manual_segments(manual_segments: dict | None) -> dict[str, dict]:
 def _endpoint_caption(endpoint: dict[str, object] | None) -> str:
     endpoint = normalize_endpoint(endpoint)
     if endpoint is None:
-        return "None"
+        return "Aucun"
     x, y = endpoint["point"]
     return f"({float(x):.1f}, {float(y):.1f})"
 

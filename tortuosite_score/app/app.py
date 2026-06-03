@@ -39,15 +39,14 @@ from tortuosite_score.app.viewer_component import (
 )
 
 VIEWER_SELECTION_MODE_KEY = "viewer_selection_mode"
-VIEWER_INTERACTION_MODE_KEY = "viewer_interaction_mode"
 SELECTION_HISTORY_LIMIT = 50
 
 
-st.set_page_config(page_title="Tortuosite Retine", layout="wide")
-st.title("Retinal Vessel Review")
+st.set_page_config(page_title="Tortuosite retine", layout="wide")
+st.title("Revue des vaisseaux retiniens")
 st.write(
-    "Run the segmentation once, then review the extracted skeleton manually, "
-    "define vessels, classify them, and score them from the interface."
+    "Lancez la segmentation, puis revoyez manuellement le squelette extrait, "
+    "definissez les vaisseaux, classez-les et calculez leur tortuosite depuis l'interface."
 )
 
 
@@ -78,16 +77,16 @@ def _handle_run_creation(sidebar_values: dict) -> None:
 def _render_run_selector() -> str | None:
     runs = list_runs()
     if not runs:
-        st.info("Upload a retinal image and run the segmentation to start the manual review workflow.")
+        st.info("Importez une image retinienne et lancez la segmentation pour commencer la revue manuelle.")
         return None
     run_names = [run.name for run in runs]
     default_run_name = st.session_state.get("active_run_id", run_names[0])
     default_index = run_names.index(default_run_name) if default_run_name in run_names else 0
     selected_run_name = st.selectbox(
-        "Working run",
+        "Session active",
         options=run_names,
         index=default_index,
-        help="Choose which processed image you want to review.",
+        help="Choisissez quelle image traitee vous souhaitez revoir.",
     )
     st.session_state["active_run_id"] = selected_run_name
     return selected_run_name
@@ -164,7 +163,7 @@ def _render_selection_history_controls(
     undo_stack, redo_stack = _selection_history_stacks(undo_key, redo_key)
     undo_col, redo_col, count_col = st.columns([1.0, 1.0, 2.5], vertical_alignment="center")
     with undo_col:
-        if st.button("Undo", disabled=not undo_stack, use_container_width=True):
+        if st.button("Annuler", disabled=not undo_stack, use_container_width=True):
             review_state["selected_segment_refs"] = undo_selection(
                 undo_stack,
                 redo_stack,
@@ -173,7 +172,7 @@ def _render_selection_history_controls(
             st.session_state[viewer_reset_key] += 1
             st.rerun()
     with redo_col:
-        if st.button("Redo", disabled=not redo_stack, use_container_width=True):
+        if st.button("Retablir", disabled=not redo_stack, use_container_width=True):
             review_state["selected_segment_refs"] = redo_selection(
                 undo_stack,
                 redo_stack,
@@ -182,7 +181,7 @@ def _render_selection_history_controls(
             st.session_state[viewer_reset_key] += 1
             st.rerun()
     with count_col:
-        st.caption(f"{len(undo_stack)} undo step(s), {len(redo_stack)} redo step(s)")
+        st.caption(f"{len(undo_stack)} etape(s) a annuler, {len(redo_stack)} etape(s) a retablir")
 
 
 def _clear_vessel_draft(
@@ -197,7 +196,8 @@ def _clear_vessel_draft(
     end_endpoint_key: str,
     next_endpoint_target_key: str,
 ) -> None:
-    _set_selected_segment_refs(review_state, [], undo_key, redo_key)
+    review_state["selected_segment_refs"] = []
+    _clear_selection_history(undo_key, redo_key)
     st.session_state.pop(editing_vessel_name_key, None)
     st.session_state.pop(editing_original_snapshot_key, None)
     st.session_state.pop(start_endpoint_key, None)
@@ -268,11 +268,11 @@ def _dominant_category_for_vessels(
 
 def _show_saved_vessel_status(vessel_name: str, resolution: dict) -> None:
     if len(resolution.get("synthetic_links", [])) > 0:
-        st.success(f"Saved vessel `{vessel_name}` with {len(resolution['synthetic_links'])} synthetic link(s).")
+        st.success(f"Vaisseau `{vessel_name}` sauvegarde avec {len(resolution['synthetic_links'])} lien(s) synthetique(s).")
     elif not resolution.get("bridge_success", True):
-        st.warning(f"Saved vessel `{vessel_name}` with unresolved disconnected pieces.")
+        st.warning(f"Vaisseau `{vessel_name}` sauvegarde avec des morceaux discontinus non resolus.")
     else:
-        st.success(f"Saved vessel `{vessel_name}`.")
+        st.success(f"Vaisseau `{vessel_name}` sauvegarde.")
 
 
 def _single_manual_selection_ref(selected_segment_refs: list[str]) -> str | None:
@@ -296,8 +296,13 @@ def _sync_viewer_state(
         if _set_selected_segment_refs(review_state, normalized, undo_key, redo_key):
             st.rerun()
 
-    draw_action = getattr(viewer_result, "draw_action", None)
-    drawn_points = getattr(viewer_result, "drawn_segment_points", None)
+    draw_payload = getattr(viewer_result, "draw_segment", None)
+    if isinstance(draw_payload, dict):
+        draw_action = draw_payload.get("action")
+        drawn_points = draw_payload.get("points")
+    else:
+        draw_action = getattr(viewer_result, "draw_action", None)
+        drawn_points = getattr(viewer_result, "drawn_segment_points", None)
     if draw_action not in {"create", "redraw"} or not isinstance(drawn_points, list):
         return
 
@@ -305,7 +310,7 @@ def _sync_viewer_state(
         _, manual_id = parse_segment_ref(redraw_target_ref)
         updated_ref = upsert_manual_segment(review_state, drawn_points, manual_id)
         if updated_ref is None:
-            st.warning("The redrawn segment was too short to keep.")
+            st.warning("Le segment redessine etait trop court pour etre conserve.")
         else:
             current = [ref for ref in review_state["selected_segment_refs"] if ref != redraw_target_ref]
             current.append(updated_ref)
@@ -317,7 +322,7 @@ def _sync_viewer_state(
     if draw_action == "create":
         created_ref = upsert_manual_segment(review_state, drawn_points)
         if created_ref is None:
-            st.warning("The drawn segment was too short to keep.")
+            st.warning("Le segment trace etait trop court pour etre conserve.")
         else:
             current = list(review_state["selected_segment_refs"])
             current.append(created_ref)
@@ -356,36 +361,22 @@ def _sync_endpoint_selection(
 
 def _render_viewer_controls() -> dict[str, object]:
     with st.sidebar:
-        st.header("Viewer")
-        show_base_image = st.toggle("Show base image", value=True)
-        show_skeleton = st.toggle("Show skeleton", value=True)
-        show_labels = st.toggle("Show segment IDs", value=False)
-        show_vessel_labels = st.toggle("Show vessel IDs", value=False)
-        base_opacity = st.slider("Base image opacity", 0.0, 1.0, 0.95, 0.05)
+        st.header("Visionneuse")
+        show_base_image = st.toggle("Afficher l'image de base", value=True)
+        show_skeleton = st.toggle("Afficher le squelette", value=True)
+        show_labels = st.toggle("Afficher les IDs des segments", value=False)
+        show_vessel_labels = st.toggle("Afficher les IDs des vaisseaux", value=False)
+        base_opacity = st.slider("Opacite de l'image de base", 0.0, 1.0, 0.95, 0.05)
 
-    st.session_state.setdefault(VIEWER_SELECTION_MODE_KEY, "Segment parts")
-    st.session_state.setdefault(VIEWER_INTERACTION_MODE_KEY, "Select")
-    if st.session_state[VIEWER_INTERACTION_MODE_KEY] not in {"Select", "Draw new"}:
-        st.session_state[VIEWER_INTERACTION_MODE_KEY] = "Select"
+    st.session_state.setdefault(VIEWER_SELECTION_MODE_KEY, "Parties de segment")
     return {
         "show_base_image": show_base_image,
         "show_skeleton": show_skeleton,
         "show_labels": show_labels,
         "show_vessel_labels": show_vessel_labels,
         "selection_mode": st.session_state[VIEWER_SELECTION_MODE_KEY],
-        "interaction_mode_label": st.session_state[VIEWER_INTERACTION_MODE_KEY],
         "base_opacity": base_opacity,
     }
-
-
-def _render_image_interaction_controls() -> None:
-    with st.container(border=True):
-        st.radio(
-            "Interaction mode",
-            options=["Select", "Draw new"],
-            horizontal=True,
-            key=VIEWER_INTERACTION_MODE_KEY,
-        )
 
 
 @st.fragment
@@ -395,7 +386,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
     branches_df = pd.DataFrame(bundle["branches_df"])
     review_state = get_or_create_review_state(selected_run_dir, branches_df=branches_df)
     if review_state.get("legacy_state_ignored"):
-        st.warning("An older manual review file exists for this run. It was ignored because this version uses the v2 segment schema.")
+        st.warning("Un ancien fichier de revue manuelle existe pour cette session. Il a ete ignore car cette version utilise le schema de segments v2.")
 
     vessel_name_key = f"vessel_name_input::{selected_run_name}"
     vessel_category_key = f"vessel_category_input::{selected_run_name}"
@@ -457,7 +448,6 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
     show_labels = bool(viewer_options["show_labels"])
     show_vessel_labels = bool(viewer_options["show_vessel_labels"])
     selection_mode = str(viewer_options["selection_mode"])
-    interaction_mode_label = str(viewer_options["interaction_mode_label"])
     base_opacity = float(viewer_options["base_opacity"])
 
     selected_segment_refs = segment_refs_for_review_state(review_state)
@@ -475,7 +465,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
         allow_reuse_assigned=True,
         provisional_synthetic_links=provisional_resolution["synthetic_links"],
     )
-    interaction_mode = {"Select": "select", "Draw new": "draw"}[interaction_mode_label]
+    interaction_mode = "both"
     selected_start_endpoint = st.session_state.get(start_endpoint_key)
     selected_end_endpoint = st.session_state.get(end_endpoint_key)
     endpoint_segments = [
@@ -500,7 +490,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
                 "imageHeight": bundle["image_height"],
                 "segments": viewer_segments,
                 "selectedSegmentRefs": selected_segment_refs,
-                "selectionMode": "vessel" if selection_mode == "Whole vessels" else "segment",
+                "selectionMode": "vessel" if selection_mode == "Vaisseaux entiers" else "segment",
                 "interactionMode": interaction_mode,
                 "showBaseImage": show_base_image,
                 "showSkeleton": show_skeleton,
@@ -511,11 +501,11 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
             },
             default={"selected_segment_refs": selected_segment_refs},
             on_selected_segment_refs_change=lambda: None,
+            on_draw_segment_change=lambda: None,
             key=f"branch_viewer::{selected_run_name}::{st.session_state[viewer_reset_key]}",
             width="stretch",
             height=720,
         )
-        _render_image_interaction_controls()
     _sync_viewer_state(
         viewer_result,
         review_state,
@@ -529,10 +519,10 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
 
     if endpoint_col is not None:
         with endpoint_col:
-            st.subheader("Tortuosity endpoints")
+            st.subheader("Points de tortuosite")
             st.caption(
-                "After selecting the vessel segments on the left, click this zoomed view to choose "
-                "the start and end points for tortuosity scoring."
+                "Apres avoir selectionne les segments du vaisseau a gauche, cliquez sur cette vue zoomee pour choisir "
+                "les points de depart et d'arrivee du calcul de tortuosite."
             )
             endpoint_result = NODE_ENDPOINT_VIEWER(
                 data={
@@ -564,28 +554,28 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
                 start_x, start_y = selected_start_endpoint["point"]
                 end_x, end_y = selected_end_endpoint["point"]
                 st.caption(
-                    f"Start `{start_x:.1f}, {start_y:.1f}`, end `{end_x:.1f}, {end_y:.1f}`. "
-                    "Each click alternates between setting start and end."
+                    f"Depart `{start_x:.1f}, {start_y:.1f}`, arrivee `{end_x:.1f}, {end_y:.1f}`. "
+                    "Chaque clic alterne entre depart et arrivee."
                 )
 
     selected_segment_refs = segment_refs_for_review_state(review_state)
     selected_complete_vessels = _selected_complete_vessel_names(review_state, selected_segment_refs)
     selection_df = build_selection_table(branches_df, review_state["manual_segments"], selected_segment_refs)
     if selection_df.empty:
-        st.info("Click model segments or draw manual segments to build a vessel selection.")
+        st.info("Cliquez sur les segments modele ou tracez des segments manuels pour construire une selection de vaisseau.")
     else:
-        st.subheader("Current selection")
+        st.subheader("Selection courante")
         st.dataframe(selection_df, use_container_width=True, hide_index=True)
         if selected_complete_vessels:
             st.caption(
-                "Complete saved vessel(s) in selection: "
+                "Vaisseau(x) sauvegarde(s) complet(s) dans la selection : "
                 + ", ".join(f"`{vessel_name}`" for vessel_name in selected_complete_vessels)
             )
 
     if selected_segment_refs and redraw_target_ref:
         delete_col, clear_endpoint_col = st.columns(2)
         with delete_col:
-            if st.button("Delete selected manual segment", use_container_width=True):
+            if st.button("Supprimer le segment manuel selectionne", use_container_width=True):
                 _, manual_segment_id = parse_segment_ref(redraw_target_ref)
                 previous_refs = segment_refs_for_review_state(review_state)
                 remove_manual_segment(review_state, manual_segment_id)
@@ -599,7 +589,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
                 persist_manual_review(selected_run_dir, review_state, branches_df)
                 st.rerun()
         with clear_endpoint_col:
-            if st.button("Clear picked endpoints", use_container_width=True):
+            if st.button("Effacer les points choisis", use_container_width=True):
                 st.session_state.pop(start_endpoint_key, None)
                 st.session_state.pop(end_endpoint_key, None)
                 st.session_state[next_endpoint_target_key] = "start"
@@ -647,16 +637,16 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
 
     vessel_df = build_vessel_scores_table(review_state, branches_df)
     if not vessel_df.empty:
-        st.subheader("Saved vessel scores")
+        st.subheader("Scores des vaisseaux sauvegardes")
         st.dataframe(vessel_df, use_container_width=True, hide_index=True)
         st.download_button(
-            "Download vessel scores",
+            "Telecharger les scores des vaisseaux",
             data=vessel_df.to_csv(index=False).encode("utf-8"),
             file_name=f"{selected_run_name}_manual_vessels.csv",
             mime="text/csv",
         )
-        if not vessel_df[vessel_df["Bridge status"] == "partial"].empty:
-            st.warning("Some vessels still contain disconnected selections.")
+        if not vessel_df[vessel_df["Statut du pont"] == "partiel"].empty:
+            st.warning("Certains vaisseaux contiennent encore des selections discontinues.")
 
 
 def _render_vessel_draft(
@@ -681,25 +671,29 @@ def _render_vessel_draft(
     end_endpoint_key: str,
     next_endpoint_target_key: str,
 ) -> None:
-    st.subheader("Vessel draft")
-    st.info(f"Editing `{editing_vessel_name}`. Changes stay temporary until you apply them." if is_editing_vessel else "New vessel draft. Select model/manual segments, then save it as a vessel.")
-    vessel_category = st.radio("Vessel category", options=["artere", "veine"], horizontal=True, key=vessel_category_key)
-    vessel_name = st.text_input("Vessel name", key=vessel_name_key)
+    st.subheader("Brouillon de vaisseau")
+    st.info(
+        f"Edition de `{editing_vessel_name}`. Les modifications restent temporaires jusqu'a validation."
+        if is_editing_vessel
+        else "Nouveau brouillon de vaisseau. Selectionnez des segments modele ou manuels, puis enregistrez-le comme vaisseau."
+    )
+    vessel_category = st.radio("Categorie du vaisseau", options=["artere", "veine"], horizontal=True, key=vessel_category_key)
+    vessel_name = st.text_input("Nom du vaisseau", key=vessel_name_key)
     if is_editing_vessel:
-        st.caption("Renaming here will replace the saved vessel name when changes are applied.")
+        st.caption("Le renommage ici remplacera le nom du vaisseau sauvegarde lors de la validation.")
     else:
-        st.caption(f"If left empty, the next name will be `{next_default_vessel_name(review_state['vessels'], vessel_category)}`.")
-    st.caption(f"{len(selected_segment_refs)} segment(s) currently selected.")
+        st.caption(f"Si vide, le prochain nom sera `{next_default_vessel_name(review_state['vessels'], vessel_category)}`.")
+    st.caption(f"{len(selected_segment_refs)} segment(s) actuellement selectionne(s).")
 
     def can_save(action: str) -> bool:
         if not selected_segment_refs:
-            st.warning(f"Select at least one segment before {action}.")
+            st.warning(f"Selectionnez au moins un segment avant de {action}.")
             return False
         if selected_start_endpoint is None or selected_end_endpoint is None:
-            st.warning(f"Pick a tortuosity start and end before {action}.")
+            st.warning(f"Choisissez un depart et une arrivee de tortuosite avant de {action}.")
             return False
         if selected_start_endpoint == selected_end_endpoint:
-            st.warning("Start and end must be different points.")
+            st.warning("Le depart et l'arrivee doivent etre differents.")
             return False
         return True
 
@@ -734,25 +728,25 @@ def _render_vessel_draft(
     if is_editing_vessel:
         apply_col, save_new_col, cancel_col = st.columns(3)
         with apply_col:
-            if st.button("Apply changes", type="primary", use_container_width=True) and can_save("applying changes"):
+            if st.button("Appliquer les changements", type="primary", use_container_width=True) and can_save("appliquer les changements"):
                 clean_name = _resolve_clean_vessel_name(vessel_name, vessel_category, review_state["vessels"])
                 if clean_name != editing_vessel_name and clean_name in review_state["vessels"]:
-                    st.warning(f"`{clean_name}` already exists. Choose a different name before applying.")
+                    st.warning(f"`{clean_name}` existe deja. Choisissez un autre nom avant de valider.")
                 else:
                     save_payload(clean_name, replace_name=editing_vessel_name)
         with save_new_col:
-            if st.button("Save as new", use_container_width=True) and can_save("saving a vessel"):
+            if st.button("Enregistrer comme nouveau", use_container_width=True) and can_save("enregistrer un vaisseau"):
                 clean_name = _resolve_clean_vessel_name(
                     vessel_name if vessel_name.strip() != editing_vessel_name else "",
                     vessel_category,
                     review_state["vessels"],
                 )
                 if clean_name in review_state["vessels"]:
-                    st.warning(f"`{clean_name}` already exists. Choose a different name for the new vessel.")
+                    st.warning(f"`{clean_name}` existe deja. Choisissez un autre nom pour le nouveau vaisseau.")
                 else:
                     save_payload(clean_name)
         with cancel_col:
-            if st.button("Cancel edit", use_container_width=True):
+            if st.button("Annuler l'edition", use_container_width=True):
                 _clear_vessel_draft(
                     review_state,
                     undo_key,
@@ -769,18 +763,18 @@ def _render_vessel_draft(
     else:
         save_col, clear_col, reset_col = st.columns(3)
         with save_col:
-            if st.button("Save current vessel", type="primary", use_container_width=True) and can_save("saving a vessel"):
+            if st.button("Enregistrer le vaisseau actuel", type="primary", use_container_width=True) and can_save("enregistrer un vaisseau"):
                 clean_name = _resolve_clean_vessel_name(vessel_name, vessel_category, review_state["vessels"])
                 if clean_name in review_state["vessels"]:
-                    st.warning(f"`{clean_name}` already exists. Choose a different name.")
+                    st.warning(f"`{clean_name}` existe deja. Choisissez un autre nom.")
                 else:
                     save_payload(clean_name)
         with clear_col:
-            if st.button("Clear typed name", use_container_width=True):
+            if st.button("Effacer le nom saisi", use_container_width=True):
                 st.session_state[vessel_name_reset_key] = True
                 st.rerun()
         with reset_col:
-            if st.button("Clear draft selection", use_container_width=True):
+            if st.button("Effacer la selection du brouillon", use_container_width=True):
                 review_state["selected_segment_refs"] = []
                 _clear_selection_history(undo_key, redo_key)
                 st.session_state[viewer_reset_key] += 1
@@ -826,10 +820,10 @@ def _render_merge_controls(
 ) -> None:
     merge_ready = len(selected_complete_vessels) >= 2
     if not st.button(
-        f"Merge {len(selected_complete_vessels)} selected vessels" if merge_ready else "Merge selected vessels",
+        f"Fusionner {len(selected_complete_vessels)} vaisseaux selectionnes" if merge_ready else "Fusionner les vaisseaux selectionnes",
         disabled=not merge_ready,
         use_container_width=True,
-        help="Select at least two complete saved vessels.",
+        help="Selectionnez au moins deux vaisseaux sauvegardes complets.",
     ):
         return
     merged_refs = sorted(
@@ -844,13 +838,13 @@ def _render_merge_controls(
     clean_name = _resolve_clean_vessel_name(vessel_name, merged_category, review_state["vessels"])
     remaining = set(review_state["vessels"]) - set(selected_complete_vessels)
     if clean_name in remaining:
-        st.warning(f"`{clean_name}` already exists. Choose a different name for the merged vessel.")
+        st.warning(f"`{clean_name}` existe deja. Choisissez un autre nom pour le vaisseau fusionne.")
         return
     if selected_start_endpoint is None or selected_end_endpoint is None:
-        st.warning("Pick a tortuosity start and end before merging vessels.")
+        st.warning("Choisissez un depart et une arrivee de tortuosite avant de fusionner les vaisseaux.")
         return
     if selected_start_endpoint == selected_end_endpoint:
-        st.warning("Start and end must be different points.")
+        st.warning("Le depart et l'arrivee doivent etre differents.")
         return
     payload, resolution = build_vessel_payload(
         branches_df,
@@ -876,9 +870,9 @@ def _render_merge_controls(
         next_endpoint_target_key,
     )
     persist_manual_review(selected_run_dir, review_state, branches_df)
-    st.success(f"Merged {len(selected_complete_vessels)} vessels into `{clean_name}` as `{merged_category}`.")
+    st.success(f"{len(selected_complete_vessels)} vaisseaux fusionnes en `{clean_name}` comme `{merged_category}`.")
     if not resolution["bridge_success"]:
-        st.info("The merged vessel still has disconnected pieces.")
+        st.info("Le vaisseau fusionne contient encore des morceaux discontinus.")
     st.rerun()
 
 
@@ -895,28 +889,28 @@ def _render_saved_vessels(
     editing_original_snapshot_key: str,
     vessel_name_reset_key: str,
 ) -> None:
-    st.subheader("Saved vessels")
+    st.subheader("Vaisseaux sauvegardes")
     vessel_names = sorted(review_state["vessels"])
     if not vessel_names:
-        st.info("Saved vessels will appear here.")
+        st.info("Les vaisseaux sauvegardes apparaitront ici.")
         return
     if vessel_load_key not in st.session_state or st.session_state[vessel_load_key] not in vessel_names:
         st.session_state[vessel_load_key] = vessel_names[0]
-    vessel_to_load = st.selectbox("Saved vessels list", options=vessel_names, key=vessel_load_key)
+    vessel_to_load = st.selectbox("Liste des vaisseaux sauvegardes", options=vessel_names, key=vessel_load_key)
     load_col, add_col, delete_col = st.columns(3)
     with load_col:
-        if st.button("Open for editing", use_container_width=True):
+        if st.button("Ouvrir pour edition", use_container_width=True):
             st.session_state[pending_edit_key] = vessel_to_load
             st.session_state[viewer_reset_key] += 1
             st.rerun()
     with add_col:
-        if st.button("Add to selection", use_container_width=True):
+        if st.button("Ajouter a la selection", use_container_width=True):
             current = set(review_state["selected_segment_refs"])
             current.update(segment_refs_for_vessel(review_state["vessels"][vessel_to_load]))
             _set_selected_segment_refs(review_state, list(current), undo_key, redo_key, viewer_reset_key)
             st.rerun()
     with delete_col:
-        if st.button("Delete saved vessel", use_container_width=True):
+        if st.button("Supprimer le vaisseau sauvegarde", use_container_width=True):
             del review_state["vessels"][vessel_to_load]
             if st.session_state.get(editing_vessel_name_key) == vessel_to_load:
                 st.session_state.pop(editing_vessel_name_key, None)
@@ -935,12 +929,12 @@ def main() -> None:
     if selected_run_name is None:
         st.stop()
     active_view = st.radio(
-        "View",
-        options=["Manual Review", "Debug Outputs"],
+        "Vue",
+        options=["Revue manuelle", "Sorties de debogage"],
         horizontal=True,
         label_visibility="collapsed",
     )
-    if active_view == "Manual Review":
+    if active_view == "Revue manuelle":
         viewer_options = _render_viewer_controls()
         _render_manual_review(selected_run_name, viewer_options)
     else:

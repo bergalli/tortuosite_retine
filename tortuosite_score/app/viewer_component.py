@@ -69,7 +69,7 @@ BRANCH_VIEWER = st.components.v2.component(
     """,
     js="""
     export default function(component) {
-      const { parentElement, data, setStateValue } = component;
+      const { parentElement, data, setStateValue, setTriggerValue } = component;
       const svg = parentElement.querySelector("#branch-viewer");
       const svgNs = "http://www.w3.org/2000/svg";
       let currentSelection = Array.isArray(data.selectedSegmentRefs)
@@ -77,8 +77,11 @@ BRANCH_VIEWER = st.components.v2.component(
         : [];
       let currentStroke = [];
       let isDrawing = false;
-      const interactionMode = data.interactionMode ?? "select";
+      let activePointerId = null;
+      let pendingClickSegment = null;
+      const interactionMode = data.interactionMode ?? "both";
       const selectedColor = "#00c2a8";
+      const minDrawLength = 3;
 
       function make(tag, attrs = {}) {
         const node = document.createElementNS(svgNs, tag);
@@ -129,9 +132,6 @@ BRANCH_VIEWER = st.components.v2.component(
       }
 
       function toggleSelection(segment) {
-        if (interactionMode !== "select") {
-          return;
-        }
         if (data.selectionMode === "vessel") {
           toggleVessel(segment);
         } else {
@@ -150,11 +150,26 @@ BRANCH_VIEWER = st.components.v2.component(
         ];
       }
 
+      function strokeLength(points) {
+        let length = 0;
+        for (let index = 1; index < points.length; index += 1) {
+          const previous = points[index - 1];
+          const point = points[index];
+          length += Math.hypot(point[0] - previous[0], point[1] - previous[1]);
+        }
+        return length;
+      }
+
       function beginDraw(event) {
-        if (interactionMode === "select") {
+        if (event.button !== undefined && event.button !== 0) {
           return;
         }
         event.preventDefault();
+        if (event.pointerId !== undefined && svg.setPointerCapture) {
+          svg.setPointerCapture(event.pointerId);
+        }
+        activePointerId = event.pointerId ?? null;
+        pendingClickSegment = event.target.__segmentData ?? null;
         isDrawing = true;
         currentStroke = [clientPointToSvg(event)];
         render();
@@ -162,6 +177,9 @@ BRANCH_VIEWER = st.components.v2.component(
 
       function extendDraw(event) {
         if (!isDrawing) {
+          return;
+        }
+        if (activePointerId !== null && event.pointerId !== activePointerId) {
           return;
         }
         event.preventDefault();
@@ -173,15 +191,31 @@ BRANCH_VIEWER = st.components.v2.component(
         }
       }
 
-      function finishDraw() {
+      function finishDraw(event) {
         if (!isDrawing) {
           return;
         }
-        isDrawing = false;
-        if (currentStroke.length >= 2) {
-          setStateValue("drawn_segment_points", currentStroke);
-          setStateValue("draw_action", interactionMode === "redraw" ? "redraw" : "create");
+        if (activePointerId !== null && event?.pointerId !== undefined && event.pointerId !== activePointerId) {
+          return;
         }
+        if (event?.clientX !== undefined && event?.clientY !== undefined) {
+          extendDraw(event);
+        }
+        if (event?.pointerId !== undefined && svg.hasPointerCapture?.(event.pointerId)) {
+          svg.releasePointerCapture(event.pointerId);
+        }
+        isDrawing = false;
+        const shouldDraw = currentStroke.length >= 2 && strokeLength(currentStroke) >= minDrawLength;
+        if (shouldDraw) {
+          setTriggerValue("draw_segment", {
+            action: interactionMode === "redraw" ? "redraw" : "create",
+            points: currentStroke,
+          });
+        } else if (pendingClickSegment !== null) {
+          toggleSelection(pendingClickSegment);
+        }
+        activePointerId = null;
+        pendingClickSegment = null;
         currentStroke = [];
         render();
       }
@@ -191,7 +225,7 @@ BRANCH_VIEWER = st.components.v2.component(
         const width = data.imageWidth ?? 1000;
         const height = data.imageHeight ?? 1000;
         svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-        svg.style.cursor = interactionMode === "select" ? "crosshair" : "cell";
+        svg.style.cursor = "crosshair";
 
         svg.appendChild(make("rect", { x: 0, y: 0, width, height, fill: "#050505" }));
 
@@ -253,10 +287,7 @@ BRANCH_VIEWER = st.components.v2.component(
             });
             hitArea.style.cursor = segment.locked ? "default" : "pointer";
             if (!segment.locked) {
-              hitArea.addEventListener("click", (event) => {
-                event.stopPropagation();
-                toggleSelection(segment);
-              });
+              hitArea.__segmentData = segment;
             }
             segmentGroup.appendChild(hitArea);
             segmentsGroup.appendChild(segmentGroup);
@@ -317,7 +348,6 @@ BRANCH_VIEWER = st.components.v2.component(
       svg.onpointerdown = beginDraw;
       svg.onpointermove = extendDraw;
       svg.onpointerup = finishDraw;
-      svg.onpointerleave = finishDraw;
       svg.onpointercancel = finishDraw;
 
       render();
