@@ -80,6 +80,7 @@ BRANCH_VIEWER = st.components.v2.component(
       let activePointerId = null;
       let pendingClickSegment = null;
       const interactionMode = data.interactionMode ?? "both";
+      const readOnly = interactionMode === "readonly" || data.readOnly === true;
       const selectedColor = "#00c2a8";
       const minDrawLength = 3;
 
@@ -102,6 +103,9 @@ BRANCH_VIEWER = st.components.v2.component(
       }
 
       function toggleSegment(segmentRef) {
+        if (readOnly) {
+          return;
+        }
         const next = new Set(currentSelection);
         if (next.has(segmentRef)) {
           next.delete(segmentRef);
@@ -114,6 +118,9 @@ BRANCH_VIEWER = st.components.v2.component(
       }
 
       function toggleVessel(segment) {
+        if (readOnly) {
+          return;
+        }
         const targetRefs = Array.isArray(segment.vesselSegmentRefs) && segment.vesselSegmentRefs.length > 0
           ? segment.vesselSegmentRefs
           : [segment.segmentRef];
@@ -161,6 +168,9 @@ BRANCH_VIEWER = st.components.v2.component(
       }
 
       function beginDraw(event) {
+        if (readOnly) {
+          return;
+        }
         if (event.button !== undefined && event.button !== 0) {
           return;
         }
@@ -225,7 +235,7 @@ BRANCH_VIEWER = st.components.v2.component(
         const width = data.imageWidth ?? 1000;
         const height = data.imageHeight ?? 1000;
         svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-        svg.style.cursor = "crosshair";
+        svg.style.cursor = readOnly ? "default" : "crosshair";
 
         svg.appendChild(make("rect", { x: 0, y: 0, width, height, fill: "#050505" }));
 
@@ -285,8 +295,8 @@ BRANCH_VIEWER = st.components.v2.component(
               "stroke-linejoin": "round",
               "vector-effect": "non-scaling-stroke",
             });
-            hitArea.style.cursor = segment.locked ? "default" : "pointer";
-            if (!segment.locked) {
+            hitArea.style.cursor = (readOnly || segment.locked) ? "default" : "pointer";
+            if (!readOnly && !segment.locked) {
               hitArea.__segmentData = segment;
             }
             segmentGroup.appendChild(hitArea);
@@ -326,12 +336,13 @@ BRANCH_VIEWER = st.components.v2.component(
         }
 
         if (data.showVesselLabels) {
+          const vesselLabelFontSize = data.vesselLabelFontSize ?? 16;
           (data.vesselLabels ?? []).forEach((label) => {
             const text = make("text", {
               x: label.position[0],
               y: label.position[1],
               fill: label.color ?? "#ffffff",
-              "font-size": 16,
+              "font-size": vesselLabelFontSize,
               "font-weight": 800,
               "text-anchor": "middle",
               "paint-order": "stroke",
@@ -345,10 +356,12 @@ BRANCH_VIEWER = st.components.v2.component(
         }
       }
 
-      svg.onpointerdown = beginDraw;
-      svg.onpointermove = extendDraw;
-      svg.onpointerup = finishDraw;
-      svg.onpointercancel = finishDraw;
+      if (!readOnly) {
+        svg.onpointerdown = beginDraw;
+        svg.onpointermove = extendDraw;
+        svg.onpointerup = finishDraw;
+        svg.onpointercancel = finishDraw;
+      }
 
       render();
       return () => {};

@@ -5,10 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "matplotlib>=3.10.9",
     "opencv-python>=4.13.0.92",
     "pandas>=3.0.3",
     "pillow>=12.2.0",
     "scikit-image>=0.26.0",
+    "scipy>=1.17.1",
     "streamlit>=1.45.1",
 ]
 

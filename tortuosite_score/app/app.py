@@ -30,6 +30,7 @@ from tortuosite_score.app.review_state import (
     undo_selection,
     upsert_manual_segment,
 )
+from tortuosite_score.app.results_page import render_results_page
 from tortuosite_score.app.ui_sections import render_debug_tab, render_sidebar_run_setup
 from tortuosite_score.app.viewer_component import (
     BRANCH_VIEWER,
@@ -930,13 +931,15 @@ def main() -> None:
         st.stop()
     active_view = st.radio(
         "Vue",
-        options=["Revue manuelle", "Sorties de debogage"],
+        options=["Revue manuelle", "Resultats", "Sorties de debogage"],
         horizontal=True,
         label_visibility="collapsed",
     )
     if active_view == "Revue manuelle":
         viewer_options = _render_viewer_controls()
         _render_manual_review(selected_run_name, viewer_options)
+    elif active_view == "Resultats":
+        render_results_page()
     else:
         render_debug_tab(RUNS_ROOT / selected_run_name)
 
