@@ -20,9 +20,11 @@ from tortuosite_score.app.review_state import (
     segment_ref_sort_key,
     segment_refs_for_vessel,
 )
-from tortuosite_score.vessels_detection.local_bump_score import (
-    LocalBumpSettings,
-    add_comparative_hybrid_score,
+from tortuosite_score.vessels_detection.local_bump_score import add_comparative_hybrid_score
+from tortuosite_score.vessels_detection.scoring import (
+    ScoringConfig,
+    scoring_config as build_scoring_config,
+    scoring_method_spec,
     score_run,
 )
 
@@ -45,6 +47,17 @@ LOCAL_BUMP_METHOD_EXPLANATION = (
     "pixels. Le calcul mesure ensuite les changements locaux d'angle et les alternances de courbure. Ainsi, un grand "
     "virage regulier reste peu penalise, alors qu'un vaisseau presque droit mais bossue ou ondule obtient un score "
     "plus eleve."
+)
+CURVATURE_SQUARED_METHOD_EXPLANATION = (
+    "Le score actuel est calcule uniquement sur les vaisseaux sauvegardes. Pour chaque vaisseau, la ligne centrale "
+    "ordonnee est re-echantillonnee puis legerement lissee. La courbure locale est estimee numeriquement le long de "
+    "l'abscisse curviligne, puis le carre de cette courbure est integre et divise par la longueur du vaisseau. Le "
+    "score obtenu correspond a la valeur brute de la formule T = (1 / L) integral kappa(s)^2 ds."
+)
+ARC_CHORD_METHOD_EXPLANATION = (
+    "Le score actuel est calcule uniquement sur les vaisseaux sauvegardes. Pour chaque vaisseau, la longueur du trajet "
+    "ordonne est comparee a la corde entre le point de depart et le point d'arrivee. Le rapport arc/chord mesure donc "
+    "l'allongement global du vaisseau."
 )
 HYBRID_SCORE_EXPLANATION = (
     "Le score final de l'oeil combine une moyenne des vaisseaux sauvegardes ponderee par la longueur et une composante "
@@ -262,20 +275,22 @@ def generate_results_pdf(
     return buffer.getvalue()
 
 
-def generate_local_bump_results_pdf(run_dirs: list[Path]) -> bytes:
-    settings, scored_runs, summary_table = _score_local_bump_report_runs(run_dirs)
-    return _generate_local_bump_results_pdf_from_scores(settings, scored_runs, summary_table)
+def generate_local_bump_results_pdf(run_dirs: list[Path], scoring_config: ScoringConfig | None = None) -> bytes:
+    scoring_config = scoring_config or build_scoring_config()
+    scoring_config, scored_runs, summary_table = _score_local_bump_report_runs(run_dirs, scoring_config)
+    return _generate_local_bump_results_pdf_from_scores(scoring_config, scored_runs, summary_table)
 
 
 def _score_local_bump_report_runs(
     run_dirs: list[Path],
-) -> tuple[LocalBumpSettings, list[tuple[Path, dict[str, object], pd.DataFrame]], pd.DataFrame]:
-    settings = LocalBumpSettings()
+    scoring_config: ScoringConfig | None = None,
+) -> tuple[ScoringConfig, list[tuple[Path, dict[str, object], pd.DataFrame]], pd.DataFrame]:
+    scoring_config = scoring_config or build_scoring_config()
     run_dirs = _local_bump_report_runs(run_dirs)
     scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]] = []
     for run_dir in run_dirs:
         try:
-            summary, system_scores = score_run(run_dir, settings)
+            summary, system_scores = score_run(run_dir, scoring_config)
         except (FileNotFoundError, ValueError, OSError, KeyError):
             continue
         scored_runs.append((run_dir, summary, system_scores))
@@ -285,18 +300,18 @@ def _score_local_bump_report_runs(
     for run_dir, summary, _system_scores in scored_runs:
         if run_dir.name in comparative_scores:
             summary["comparative_hybrid_score"] = comparative_scores[run_dir.name]
-    return settings, scored_runs, summary_table
+    return scoring_config, scored_runs, summary_table
 
 
 def _generate_local_bump_results_pdf_from_scores(
-    settings: LocalBumpSettings,
+    scoring_config: ScoringConfig,
     scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]],
     summary_table: pd.DataFrame,
 ) -> bytes:
     buffer = io.BytesIO()
     with PdfPages(buffer) as pdf:
-        _add_local_bump_cover_page(pdf, summary_table)
-        _add_local_bump_method_page(pdf, settings)
+        _add_local_bump_cover_page(pdf, summary_table, scoring_config)
+        _add_local_bump_method_page(pdf, scoring_config)
         _add_local_bump_scores_page(pdf, summary_table)
         for run_dir, summary, system_scores in scored_runs:
             _add_local_bump_run_page(pdf, run_dir, summary, system_scores)
@@ -346,7 +361,9 @@ def render_overlay_image(
     return image
 
 
-def render_results_page() -> None:
+def render_results_page(scoring_config: ScoringConfig | None = None) -> None:
+    scoring_config = scoring_config or build_scoring_config()
+    method = scoring_method_spec(scoring_config.method_id)
     runs = list_runs()
     if not runs:
         st.info("Importez au moins une image retinienne avant de generer des resultats.")
@@ -357,24 +374,25 @@ def render_results_page() -> None:
                 [
                     "- Les vaisseaux sont d'abord sauvegardes manuellement ou via `Auto-complete skeleton into saved vessels`.",
                     "- Le score final est calcule uniquement sur ces vaisseaux sauvegardes.",
-                    "- Le score principal mesure des bosses et oscillations locales, pas seulement un grand virage regulier.",
+                    f"- La methode active est `{method.label}`.",
+                    f"- {method.short_description}",
                     "- `Arc/chord` reste visible seulement comme diagnostic.",
                 ]
             )
         )
-    with st.spinner("Calcul des scores local-bump..."):
-        settings, scored_runs, summary_table = _score_local_bump_report_runs(runs)
+    with st.spinner(f"Calcul des scores {method.label}..."):
+        scoring_config, scored_runs, summary_table = _score_local_bump_report_runs(runs, scoring_config)
         all_systems_table = _build_all_systems_table(scored_runs)
 
     if summary_table.empty:
-        st.warning("Aucun run exploitable trouve pour calculer le score local-bump.")
+        st.warning(f"Aucun run exploitable trouve pour calculer le score {method.label}.")
         return
 
     st.dataframe(summary_table, hide_index=True, width="stretch")
     st.download_button(
         "Telecharger les scores CSV",
         data=summary_table.to_csv(index=False).encode("utf-8"),
-        file_name="scores_tortuosite_local_bump.csv",
+        file_name=f"scores_tortuosite_{method.method_id}.csv",
         mime="text/csv",
     )
     if not all_systems_table.empty:
@@ -386,8 +404,8 @@ def render_results_page() -> None:
         )
     st.download_button(
         "Generer le rapport PDF",
-        data=_generate_local_bump_results_pdf_from_scores(settings, scored_runs, summary_table),
-        file_name="rapport_tortuosite_local_bump.pdf",
+        data=_generate_local_bump_results_pdf_from_scores(scoring_config, scored_runs, summary_table),
+        file_name=f"rapport_tortuosite_{method.method_id}.pdf",
         mime="application/pdf",
     )
 
@@ -408,7 +426,8 @@ def _build_local_bump_summary_table(scored_runs: list[tuple[Path, dict[str, obje
             {
                 "Image": run_dir.name,
                 "Oeil": summary.get("eye_number"),
-                "Score local-bump": summary.get("eye_tortuosity_score"),
+                "Methode": summary.get("scoring_method_label"),
+                "Score principal": summary.get("eye_tortuosity_score"),
                 "Score moyen": summary.get("all_vessels_score"),
                 "Queue superieure": summary.get("all_vessels_tail_score"),
                 "Arteres": summary.get("artery_score"),
@@ -422,11 +441,11 @@ def _build_local_bump_summary_table(scored_runs: list[tuple[Path, dict[str, obje
     if not rows:
         return pd.DataFrame()
     table = add_comparative_hybrid_score(pd.DataFrame(rows).rename(columns={
-        "Score local-bump": "eye_tortuosity_score",
+        "Score principal": "eye_tortuosity_score",
         "Score moyen": "all_vessels_score",
     }))
     table = table.rename(columns={
-        "eye_tortuosity_score": "Score local-bump",
+        "eye_tortuosity_score": "Score principal",
         "all_vessels_score": "Score moyen",
         "comparative_hybrid_score": "Score comparatif",
     })
@@ -447,11 +466,13 @@ def _build_all_systems_table(scored_runs: list[tuple[Path, dict[str, object], pd
                     "Oeil": summary.get("eye_number"),
                     "Vaisseau": row.get("vessel_name"),
                     "Categorie": row.get("category"),
-                    "Score vaisseau": row.get("vessel_bump_score"),
+                    "Methode": row.get("scoring_method_label"),
+                    "Score vaisseau": row.get("primary_score"),
                     "Longueur": row.get("vessel_length"),
                     "Segments": row.get("segment_count"),
                     "Ponts": row.get("bridge_count"),
                     "Arc/chord diagnostic": row.get("arc_chord_diagnostic"),
+                    "Courbure^2 diagnostic": row.get("curvature_squared_score"),
                     "Oscillations": row.get("oscillation_count"),
                     "_run_dir": run_dir,
                     "_path_points": row.get("path_points"),
@@ -469,7 +490,8 @@ def _public_systems_table(all_systems_table: pd.DataFrame) -> pd.DataFrame:
     return all_systems_table.drop(columns=[column for column in all_systems_table.columns if column.startswith("_")])
 
 
-def _add_local_bump_cover_page(pdf: PdfPages, summary_table: pd.DataFrame) -> None:
+def _add_local_bump_cover_page(pdf: PdfPages, summary_table: pd.DataFrame, scoring_config: ScoringConfig) -> None:
+    method = scoring_method_spec(scoring_config.method_id)
     fig = Figure(figsize=(8.27, 11.69))
     ax = fig.subplots()
     ax.axis("off")
@@ -477,13 +499,12 @@ def _add_local_bump_cover_page(pdf: PdfPages, summary_table: pd.DataFrame) -> No
     lines = [
         "Rapport de tortuosite retinienne",
         "",
-        "Methode actuelle: score local-bump sur vaisseaux sauvegardes",
+        f"Methode actuelle: {method.report_method_title}",
         "",
         f"Images analysees: {image_count}",
         "",
         "Objectif clinique:",
-        "mesurer les irregularites locales, bosses et oscillations des vaisseaux sauvegardes,",
-        "plutot qu'un simple allongement arc/corde.",
+        method.short_description,
         "",
         "Important:",
         "le calcul final ne score pas tout le squelette directement; il score seulement",
@@ -493,26 +514,28 @@ def _add_local_bump_cover_page(pdf: PdfPages, summary_table: pd.DataFrame) -> No
     pdf.savefig(fig, bbox_inches="tight")
 
 
-def _add_local_bump_method_page(pdf: PdfPages, settings: LocalBumpSettings) -> None:
+def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) -> None:
+    method = scoring_method_spec(scoring_config.method_id)
+    settings = scoring_config.local_bump_settings
     fig = Figure(figsize=(8.27, 11.69))
     ax = fig.subplots()
     ax.axis("off")
     ax.text(0.08, 0.94, "Methode de calcul", va="top", fontsize=16, fontweight="bold")
-    ax.text(0.08, 0.88, LOCAL_BUMP_METHOD_EXPLANATION, va="top", fontsize=10, wrap=True)
-    steps = [
-        "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
-        "2. Reconstituer la ligne centrale ordonnee de chaque vaisseau sauvegarde.",
-        f"3. Exclure les vaisseaux trop courts: longueur minimale {settings.min_saved_vessel_length:.0f} px.",
-        f"4. Re-echantillonner chaque vaisseau tous les {settings.resample_step:.1f} px.",
-        f"5. Lisser legerement la ligne centrale: fenetre {settings.smoothing_window} points.",
-        "6. Calculer les changements locaux d'angle le long du vaisseau.",
-        f"7. Ignorer les changements minuscules: seuil {settings.curvature_threshold:.3f} rad.",
-        "8. Compter les alternances de courbure et calculer un score local-bump.",
-        "9. Agreger l'oeil entier: 70% moyenne ponderee par longueur + 30% queue superieure.",
-    ]
+    explanation = {
+        "arc_chord": ARC_CHORD_METHOD_EXPLANATION,
+        "curvature_squared": CURVATURE_SQUARED_METHOD_EXPLANATION,
+    }.get(method.method_id, LOCAL_BUMP_METHOD_EXPLANATION)
+    ax.text(0.08, 0.88, explanation, va="top", fontsize=10, wrap=True)
+    steps = list(method.report_steps)
+    if method.method_id in {"local_bump", "curvature_squared"}:
+        steps[2] = f"3. Exclure les vaisseaux trop courts: longueur minimale {settings.min_saved_vessel_length:.0f} px."
+        steps[3] = f"4. Re-echantillonner chaque vaisseau tous les {settings.resample_step:.1f} px."
+        steps[4] = f"5. Lisser legerement la ligne centrale: fenetre {settings.smoothing_window} points."
+    if method.method_id == "local_bump":
+        steps[6] = f"7. Ignorer les changements minuscules: seuil {settings.curvature_threshold:.3f} rad."
     ax.text(0.08, 0.62, "\n".join(steps), va="top", fontsize=10)
     ax.text(0.08, 0.34, HYBRID_SCORE_EXPLANATION, va="top", fontsize=9, wrap=True)
-    ax.text(0.08, 0.24, "\n".join(LOCAL_BUMP_EQUATION_LINES), va="top", fontsize=8.3)
+    ax.text(0.08, 0.24, "\n".join(method.report_equations), va="top", fontsize=8.3)
     literature_lines = ["Litterature utilisee:"] + [f"- {item}" for item in LOCAL_BUMP_LITERATURE]
     ax.text(0.08, 0.06, "\n".join(literature_lines), va="bottom", fontsize=8.2)
     pdf.savefig(fig, bbox_inches="tight")
@@ -527,7 +550,7 @@ def _add_local_bump_scores_page(pdf: PdfPages, summary_table: pd.DataFrame) -> N
         0.02,
         0.92,
         "Les images sont triees par score comparatif. Ce score est calcule a partir des vaisseaux sauvegardes; "
-        "les colonnes voisines donnent les composantes brutes.",
+        "les colonnes voisines donnent les composantes brutes et diagnostiques.",
         va="top",
         fontsize=9,
         wrap=True,
@@ -559,7 +582,7 @@ def _add_local_bump_run_page(
         image_ax.text(0.5, 0.5, "Squelette non disponible", ha="center", va="center", fontsize=11)
 
     score_lines = [
-        "Score local-bump",
+        str(summary.get("scoring_method_label", "Score principal")),
         "",
         f"Score final: {_format_pdf_value(summary.get('eye_tortuosity_score'))}",
         f"Score comparatif: {_format_pdf_value(summary.get('comparative_hybrid_score'))}",
@@ -590,7 +613,7 @@ def _add_all_systems_pdf_pages(pdf: PdfPages, all_systems_table: pd.DataFrame) -
         title_ax.text(
             0.0,
             0.55,
-            "Chaque vignette montre un vaisseau sauvegarde score, trie du plus au moins tortueux. Le surlignage "
+            "Chaque vignette montre un vaisseau sauvegarde score, trie du plus au moins eleve selon la methode active. Le surlignage "
             "jaune correspond exactement a la geometrie mesuree.",
             va="top",
             fontsize=9,
@@ -698,7 +721,7 @@ def _top_system_rows(system_scores: pd.DataFrame, limit: int = 8) -> pd.DataFram
     eligible = system_scores[system_scores["eligible"]].copy()
     if eligible.empty:
         return pd.DataFrame()
-    top = eligible.sort_values("vessel_bump_score", ascending=False).head(limit).copy()
+    top = eligible.sort_values("primary_score", ascending=False).head(limit).copy()
     top.insert(0, "highlight_label", [f"V{index}" for index in range(1, len(top) + 1)])
     return top
 
@@ -710,11 +733,12 @@ def _top_system_table(top_systems: pd.DataFrame) -> pd.DataFrame:
         "highlight_label",
         "vessel_name",
         "category",
-        "vessel_bump_score",
+        "primary_score",
         "vessel_length",
         "segment_count",
         "bridge_count",
         "arc_chord_diagnostic",
+        "curvature_squared_score",
         "local_bump_energy",
         "oscillation_count",
     ]
@@ -724,11 +748,12 @@ def _top_system_table(top_systems: pd.DataFrame) -> pd.DataFrame:
             "highlight_label": "Label",
             "vessel_name": "Vaisseau",
             "category": "Categorie",
-            "vessel_bump_score": "Score vaisseau",
+            "primary_score": "Score vaisseau",
             "vessel_length": "Longueur",
             "segment_count": "Segments",
             "bridge_count": "Ponts",
             "arc_chord_diagnostic": "Arc/chord",
+            "curvature_squared_score": "Courbure^2",
             "local_bump_energy": "Energie locale",
             "oscillation_count": "Oscillations",
         }

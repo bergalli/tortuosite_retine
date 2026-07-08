@@ -31,6 +31,11 @@ from tortuosite_score.vessels_detection.local_bump_score import (
     points_for_node_edge_path,
     root_to_leaf_paths,
 )
+from tortuosite_score.vessels_detection.scoring import (
+    ScoringConfig,
+    build_manual_vessels_export,
+    build_review_scores_table,
+)
 
 SCHEMA_VERSION = 2
 
@@ -214,7 +219,12 @@ def score_vessel(
     )
 
 
-def persist_manual_review(run_dir: Path, state: dict, branches_df: pd.DataFrame | None) -> None:
+def persist_manual_review(
+    run_dir: Path,
+    state: dict,
+    branches_df: pd.DataFrame | None,
+    scoring_config: ScoringConfig | None = None,
+) -> None:
     persisted_state = {
         "schema_version": SCHEMA_VERSION,
         "selected_segment_refs": [],
@@ -227,56 +237,7 @@ def persist_manual_review(run_dir: Path, state: dict, branches_df: pd.DataFrame 
     )
     if branches_df is None:
         return
-
-    rows: list[dict[str, object]] = []
-    manual_segments = state.get("manual_segments", {})
-    for vessel_name, vessel in state.get("vessels", {}).items():
-        metrics = score_vessel(branches_df, manual_segments, vessel)
-        model_ids, manual_ids = split_segment_refs(segment_refs_for_vessel(vessel))
-        rows.append(
-            {
-                "vessel_name": vessel_name,
-                "category": vessel.get("category", "artere"),
-                "segment_refs": json.dumps(segment_refs_for_vessel(vessel)),
-                "model_segment_ids": json.dumps(model_ids),
-                "manual_segment_ids": json.dumps(manual_ids),
-                "model_segment_count": metrics["model_segment_count"],
-                "manual_segment_count": metrics["manual_segment_count"],
-                "segment_count": metrics["segment_count"],
-                "component_count": metrics["component_count"],
-                "bridge_branch_count": metrics["bridge_branch_count"],
-                "resolved_component_count": metrics["resolved_component_count"],
-                "bridge_success": metrics["bridge_success"],
-                "start_endpoint": json.dumps(metrics["start_endpoint"]),
-                "end_endpoint": json.dumps(metrics["end_endpoint"]),
-                "path_length": metrics["length"],
-                "chord_length": metrics["chord"],
-                "tortuosity": metrics["tortuosity"],
-            }
-        )
-
-    columns = [
-        "vessel_name",
-        "category",
-        "segment_refs",
-        "model_segment_ids",
-        "manual_segment_ids",
-        "model_segment_count",
-        "manual_segment_count",
-        "segment_count",
-        "component_count",
-        "bridge_branch_count",
-        "resolved_component_count",
-        "bridge_success",
-        "start_endpoint",
-        "end_endpoint",
-        "path_length",
-        "chord_length",
-        "tortuosity",
-    ]
-    manual_df = pd.DataFrame(rows, columns=columns)
-    if not manual_df.empty:
-        manual_df = manual_df.sort_values("vessel_name")
+    manual_df = build_manual_vessels_export(branches_df, state, config=scoring_config)
     manual_df.to_csv(run_dir / "manual_vessels.csv", index=False)
 
 
@@ -305,29 +266,12 @@ def build_selection_table(
     return pd.DataFrame(rows)
 
 
-def build_vessel_scores_table(review_state: dict, branches_df: pd.DataFrame) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
-    manual_segments = review_state.get("manual_segments", {})
-    for vessel_name, vessel in sorted(review_state.get("vessels", {}).items()):
-        metrics = score_vessel(branches_df, manual_segments, vessel)
-        rows.append(
-            {
-                "Vaisseau": vessel_name,
-                "Categorie": vessel.get("category", "artere"),
-                "Debut": _endpoint_caption(metrics["start_endpoint"]),
-                "Fin": _endpoint_caption(metrics["end_endpoint"]),
-                "Segments modele": metrics["model_segment_count"],
-                "Segments manuels": metrics["manual_segment_count"],
-                "Segments": metrics["segment_count"],
-                "Composantes": metrics["component_count"],
-                "Ponts automatiques": metrics["bridge_branch_count"],
-                "Statut du pont": "connecte" if metrics["bridge_success"] else "partiel",
-                "Longueur du trajet": metrics["length"],
-                "Corde": metrics["chord"],
-                "Tortuosite": metrics["tortuosity"],
-            }
-        )
-    return pd.DataFrame(rows)
+def build_vessel_scores_table(
+    review_state: dict,
+    branches_df: pd.DataFrame,
+    scoring_config: ScoringConfig | None = None,
+) -> pd.DataFrame:
+    return build_review_scores_table(branches_df, review_state, config=scoring_config)
 
 
 def build_auto_vascx_vessels(

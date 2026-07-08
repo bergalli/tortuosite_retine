@@ -40,6 +40,7 @@ from tortuosite_score.app.viewer_component import (
     build_viewer_branches,
 )
 from tortuosite_score.vessels_detection.local_bump_score import load_saved_run_branches
+from tortuosite_score.vessels_detection.scoring import scoring_config as build_scoring_config
 
 VIEWER_SELECTION_MODE_KEY = "viewer_selection_mode"
 SELECTION_HISTORY_LIMIT = 50
@@ -288,6 +289,7 @@ def _sync_viewer_state(
     review_state: dict,
     selected_run_dir,
     branches_df: pd.DataFrame,
+    active_scoring_config,
     undo_key: str,
     redo_key: str,
     viewer_reset_key: str,
@@ -318,7 +320,7 @@ def _sync_viewer_state(
             current = [ref for ref in review_state["selected_segment_refs"] if ref != redraw_target_ref]
             current.append(updated_ref)
             _set_selected_segment_refs(review_state, current, undo_key, redo_key)
-            persist_manual_review(selected_run_dir, review_state, branches_df)
+            persist_manual_review(selected_run_dir, review_state, branches_df, active_scoring_config)
         st.session_state[viewer_reset_key] += 1
         st.rerun()
 
@@ -330,7 +332,7 @@ def _sync_viewer_state(
             current = list(review_state["selected_segment_refs"])
             current.append(created_ref)
             _set_selected_segment_refs(review_state, current, undo_key, redo_key)
-            persist_manual_review(selected_run_dir, review_state, branches_df)
+            persist_manual_review(selected_run_dir, review_state, branches_df, active_scoring_config)
         st.session_state[viewer_reset_key] += 1
         st.rerun()
 
@@ -383,7 +385,7 @@ def _render_viewer_controls() -> dict[str, object]:
 
 
 @st.fragment
-def _render_manual_review(selected_run_name: str, viewer_options: dict[str, object]) -> None:
+def _render_manual_review(selected_run_name: str, viewer_options: dict[str, object], active_scoring_config) -> None:
     selected_run_dir = RUNS_ROOT / selected_run_name
     bundle = load_review_bundle(str(selected_run_dir))
     branches_df = pd.DataFrame(bundle["branches_df"])
@@ -509,16 +511,17 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
             width="stretch",
             height=720,
         )
-    _sync_viewer_state(
-        viewer_result,
-        review_state,
-        selected_run_dir,
-        branches_df,
-        selection_undo_key,
-        selection_redo_key,
-        viewer_reset_key,
-        redraw_target_ref,
-    )
+        _sync_viewer_state(
+            viewer_result,
+            review_state,
+            selected_run_dir,
+            branches_df,
+            active_scoring_config,
+            selection_undo_key,
+            selection_redo_key,
+            viewer_reset_key,
+            redraw_target_ref,
+        )
 
     if endpoint_col is not None:
         with endpoint_col:
@@ -589,7 +592,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
                     selection_redo_key,
                     viewer_reset_key,
                 )
-                persist_manual_review(selected_run_dir, review_state, branches_df)
+                persist_manual_review(selected_run_dir, review_state, branches_df, active_scoring_config)
                 st.rerun()
         with clear_endpoint_col:
             if st.button("Effacer les points choisis", use_container_width=True):
@@ -604,6 +607,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
             branches_df,
             selected_run_dir,
             review_state,
+            active_scoring_config,
             selected_segment_refs,
             selected_start_endpoint,
             selected_end_endpoint,
@@ -628,6 +632,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
             selected_run_dir,
             branches_df,
             review_state,
+            active_scoring_config,
             viewer_reset_key,
             selection_undo_key,
             selection_redo_key,
@@ -636,6 +641,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
             selected_run_dir,
             branches_df,
             review_state,
+            active_scoring_config,
             vessel_load_key,
             pending_edit_key,
             viewer_reset_key,
@@ -646,12 +652,12 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
             vessel_name_reset_key,
         )
 
-    vessel_df = build_vessel_scores_table(review_state, branches_df)
+    vessel_df = build_vessel_scores_table(review_state, branches_df, active_scoring_config)
     if not vessel_df.empty:
-        st.subheader("Scores diagnostiques arc/corde des vaisseaux sauvegardes")
+        st.subheader("Scores des vaisseaux sauvegardes")
         st.dataframe(vessel_df, use_container_width=True, hide_index=True)
         st.download_button(
-            "Telecharger les scores diagnostiques des vaisseaux",
+            "Telecharger les scores des vaisseaux",
             data=vessel_df.to_csv(index=False).encode("utf-8"),
             file_name=f"{selected_run_name}_manual_vessels.csv",
             mime="text/csv",
@@ -664,6 +670,7 @@ def _render_auto_complete_controls(
     selected_run_dir,
     branches_df: pd.DataFrame,
     review_state: dict,
+    active_scoring_config,
     viewer_reset_key: str,
     undo_key: str,
     redo_key: str,
@@ -676,7 +683,7 @@ def _render_auto_complete_controls(
         review_state["selected_segment_refs"] = []
         _clear_selection_history(undo_key, redo_key)
         st.session_state[viewer_reset_key] += 1
-        persist_manual_review(selected_run_dir, review_state, branches_df)
+        persist_manual_review(selected_run_dir, review_state, branches_df, active_scoring_config)
         st.success(f"{created_count} vaisseau(x) auto-complete(s) sauvegarde(s).")
         st.rerun()
 
@@ -685,6 +692,7 @@ def _render_vessel_draft(
     branches_df: pd.DataFrame,
     selected_run_dir,
     review_state: dict,
+    active_scoring_config,
     selected_segment_refs: list[str],
     selected_start_endpoint,
     selected_end_endpoint,
@@ -753,7 +761,7 @@ def _render_vessel_draft(
             end_endpoint_key,
             next_endpoint_target_key,
         )
-        persist_manual_review(selected_run_dir, review_state, branches_df)
+        persist_manual_review(selected_run_dir, review_state, branches_df, active_scoring_config)
         _show_saved_vessel_status(clean_name, resolution)
         st.rerun()
 
@@ -901,7 +909,7 @@ def _render_merge_controls(
         end_endpoint_key,
         next_endpoint_target_key,
     )
-    persist_manual_review(selected_run_dir, review_state, branches_df)
+    persist_manual_review(selected_run_dir, review_state, branches_df, active_scoring_config)
     st.success(f"{len(selected_complete_vessels)} vaisseaux fusionnes en `{clean_name}` comme `{merged_category}`.")
     if not resolution["bridge_success"]:
         st.info("Le vaisseau fusionne contient encore des morceaux discontinus.")
@@ -912,6 +920,7 @@ def _render_saved_vessels(
     selected_run_dir,
     branches_df: pd.DataFrame,
     review_state: dict,
+    active_scoring_config,
     vessel_load_key: str,
     pending_edit_key: str,
     viewer_reset_key: str,
@@ -950,12 +959,13 @@ def _render_saved_vessels(
             _set_selected_segment_refs(review_state, [], undo_key, redo_key)
             st.session_state[vessel_name_reset_key] = True
             st.session_state[viewer_reset_key] += 1
-            persist_manual_review(selected_run_dir, review_state, branches_df)
+            persist_manual_review(selected_run_dir, review_state, branches_df, active_scoring_config)
             st.rerun()
 
 
 def main() -> None:
     sidebar_values = render_sidebar_run_setup()
+    active_scoring_config = build_scoring_config(sidebar_values.get("active_scoring_method"))
     _handle_run_creation(sidebar_values)
     selected_run_name = _render_run_selector()
     if selected_run_name is None:
@@ -968,9 +978,9 @@ def main() -> None:
     )
     if active_view == "Revue manuelle":
         viewer_options = _render_viewer_controls()
-        _render_manual_review(selected_run_name, viewer_options)
+        _render_manual_review(selected_run_name, viewer_options, active_scoring_config)
     elif active_view == "Resultats":
-        render_results_page()
+        render_results_page(active_scoring_config)
     else:
         render_debug_tab(RUNS_ROOT / selected_run_name)
 

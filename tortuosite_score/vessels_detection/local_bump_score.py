@@ -90,20 +90,65 @@ def local_bump_metrics(
     }
 
 
+def curvature_squared_metrics(
+    points: list[list[float]] | np.ndarray,
+    settings: LocalBumpSettings | None = None,
+) -> dict[str, float]:
+    settings = settings or LocalBumpSettings()
+    path = _prepare_path(points)
+    if len(path) < 2:
+        return _empty_curvature_squared_metrics()
+
+    branch_length = polyline_length(path)
+    chord_length = float(np.linalg.norm(path[-1] - path[0]))
+    if branch_length <= 0:
+        return _empty_curvature_squared_metrics(branch_length=branch_length, chord_length=chord_length)
+
+    resampled = resample_polyline(path, settings.resample_step)
+    smoothed = smooth_polyline(resampled, settings.smoothing_window)
+    if len(smoothed) < 3:
+        return _empty_curvature_squared_metrics(branch_length=branch_length, chord_length=chord_length)
+
+    segment_lengths = np.linalg.norm(np.diff(smoothed, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(segment_lengths)])
+    keep = np.concatenate([[True], np.diff(s) > 1e-9])
+    smoothed = smoothed[keep]
+    s = s[keep]
+    if len(smoothed) < 3 or s[-1] <= 0:
+        return _empty_curvature_squared_metrics(branch_length=branch_length, chord_length=chord_length)
+
+    edge_order = 2 if len(smoothed) >= 3 else 1
+    dx = np.gradient(smoothed[:, 0], s, edge_order=edge_order)
+    dy = np.gradient(smoothed[:, 1], s, edge_order=edge_order)
+    ddx = np.gradient(dx, s, edge_order=edge_order)
+    ddy = np.gradient(dy, s, edge_order=edge_order)
+    speed_squared = dx * dx + dy * dy
+    denominator = np.power(speed_squared, 1.5)
+    curvature = np.divide(
+        np.abs(dx * ddy - dy * ddx),
+        denominator,
+        out=np.zeros_like(denominator, dtype=float),
+        where=denominator > 1e-12,
+    )
+    curvature = np.nan_to_num(curvature, nan=0.0, posinf=0.0, neginf=0.0)
+    squared = curvature * curvature
+    integral = float(np.trapezoid(squared, s))
+    score = float(integral / branch_length) if branch_length > 0 else 0.0
+    return {
+        "curvature_squared_score": score,
+        "curvature_squared_integral": integral,
+        "mean_curvature": float(np.mean(curvature)),
+        "max_curvature": float(np.max(curvature)),
+    }
+
+
 def score_run(
     run_dir: str | Path,
     settings: LocalBumpSettings | None = None,
 ) -> tuple[dict[str, object], pd.DataFrame]:
-    settings = settings or LocalBumpSettings()
-    run_dir = Path(run_dir)
-    branches = load_saved_run_branches(run_dir)
-    vessel_scores = score_saved_vessels(run_dir, branches, settings)
-    vessel_scores["run"] = run_dir.name
-    vessel_scores["eye_number"] = eye_number_from_run_name(run_dir.name)
-    summary = summarize_saved_vessel_eye_score(vessel_scores, settings)
-    summary["run"] = run_dir.name
-    summary["eye_number"] = eye_number_from_run_name(run_dir.name)
-    return summary, vessel_scores
+    from tortuosite_score.vessels_detection.scoring import scoring_config, score_run as score_run_with_method
+
+    return score_run_with_method(run_dir, scoring_config("local_bump", settings or LocalBumpSettings()))
 
 
 def score_branch_fragments(
@@ -137,51 +182,16 @@ def score_runs(
     settings: LocalBumpSettings | None = None,
     numbered_only: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    settings = settings or LocalBumpSettings()
-    runs_root = Path(runs_root)
-    summaries: list[dict[str, object]] = []
-    systems: list[pd.DataFrame] = []
-    branch_fragments: list[pd.DataFrame] = []
-    run_dirs = sorted(path for path in runs_root.iterdir() if path.is_dir())
-    if numbered_only:
-        numbered_run_dirs = [run_dir for run_dir in run_dirs if re.match(r"^\d+_(OD|OG)$", run_dir.name)]
-        if numbered_run_dirs:
-            run_dirs = numbered_run_dirs
-    for run_dir in run_dirs:
-        summary_path = run_dir / "output" / "08_full_skeleton_summary.csv"
-        if not summary_path.exists():
-            continue
-        branches = load_saved_run_branches(run_dir)
-        eye_number = eye_number_from_run_name(run_dir.name)
-        system_scores = score_saved_vessels(run_dir, branches, settings)
-        system_scores["run"] = run_dir.name
-        system_scores["eye_number"] = eye_number
-        branch_scores = score_branch_fragments(branches, run_dir.name, eye_number, settings)
-        summary = summarize_saved_vessel_eye_score(system_scores, settings)
-        summary["run"] = run_dir.name
-        summary["eye_number"] = eye_number
-        summaries.append(summary)
-        systems.append(system_scores)
-        branch_fragments.append(branch_scores)
+    from tortuosite_score.vessels_detection.scoring import scoring_config, score_runs as score_runs_with_method
 
-    summary_df = pd.DataFrame(summaries)
-    if not summary_df.empty:
-        summary_df = add_comparative_hybrid_score(summary_df)
-        summary_df = summary_df.sort_values("comparative_hybrid_score", ascending=False).reset_index(drop=True)
-
-    system_df = pd.concat(systems, ignore_index=True) if systems else pd.DataFrame()
-    branch_df = pd.concat(branch_fragments, ignore_index=True) if branch_fragments else pd.DataFrame()
-    if output_csv is not None:
-        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
-        summary_df.to_csv(output_csv, index=False)
-    if system_output_csv is not None:
-        Path(system_output_csv).parent.mkdir(parents=True, exist_ok=True)
-        export_system_df = system_df.drop(columns=["path_points"], errors="ignore")
-        export_system_df.to_csv(system_output_csv, index=False)
-    if branch_output_csv is not None:
-        Path(branch_output_csv).parent.mkdir(parents=True, exist_ok=True)
-        branch_df.to_csv(branch_output_csv, index=False)
-    return summary_df, system_df
+    return score_runs_with_method(
+        runs_root,
+        output_csv=output_csv,
+        branch_output_csv=branch_output_csv,
+        vessel_output_csv=system_output_csv,
+        config=scoring_config("local_bump", settings or LocalBumpSettings()),
+        numbered_only=numbered_only,
+    )
 
 
 def summarize_eye_score(
@@ -236,116 +246,18 @@ def score_saved_vessels(
     branches: pd.DataFrame,
     settings: LocalBumpSettings | None = None,
 ) -> pd.DataFrame:
-    settings = settings or LocalBumpSettings()
-    state = read_manual_review_state(Path(run_dir))
-    vessels = state.get("vessels", {})
-    manual_segments = state.get("manual_segments", {})
-    segment_map = build_segment_map(branches, manual_segments if isinstance(manual_segments, dict) else {})
-    rows: list[dict[str, object]] = []
-    for index, (vessel_name, vessel) in enumerate(sorted(vessels.items()), start=1):
-        if not isinstance(vessel, dict):
-            continue
-        segment_refs = sorted(vessel.get("segment_refs", []), key=segment_ref_sort_key)
-        synthetic_links = vessel.get("synthetic_links", [])
-        path_points = ordered_points_for_segments(
-            segment_map,
-            segment_refs,
-            synthetic_links=synthetic_links if isinstance(synthetic_links, list) else [],
-            start_endpoint=vessel.get("start_endpoint"),
-            end_endpoint=vessel.get("end_endpoint"),
-        )
-        metrics = local_bump_metrics(path_points, settings)
-        diagnostic = score_segments(
-            segment_map,
-            segment_refs,
-            synthetic_links=synthetic_links if isinstance(synthetic_links, list) else [],
-            start_endpoint=vessel.get("start_endpoint"),
-            end_endpoint=vessel.get("end_endpoint"),
-        )
-        vessel_length = metrics["branch_length"]
-        rows.append(
-            {
-                "vessel_id": int(index),
-                "vessel_name": vessel_name,
-                "path_points": [[float(x), float(y)] for x, y in path_points],
-                "category": vessel.get("category", "unknown"),
-                "eligible": bool(vessel_length >= settings.min_saved_vessel_length),
-                "vessel_length": float(vessel_length),
-                "vessel_bump_score": metrics["branch_bump_score"],
-                "arc_chord_diagnostic": diagnostic.get("tortuosity", metrics["arc_chord_tortuosity"]),
-                "segment_count": diagnostic.get("segment_count", len(segment_refs)),
-                "bridge_count": diagnostic.get("bridge_branch_count", len(synthetic_links) if isinstance(synthetic_links, list) else 0),
-                "bridge_success": diagnostic.get("bridge_success", False),
-                **metrics,
-            }
-        )
-    columns = [
-        "vessel_id",
-        "vessel_name",
-        "path_points",
-        "category",
-        "eligible",
-        "vessel_length",
-        "vessel_bump_score",
-        "arc_chord_diagnostic",
-        "segment_count",
-        "bridge_count",
-        "bridge_success",
-        "branch_length",
-        "chord_length",
-        "arc_chord_tortuosity",
-        "local_bump_energy",
-        "oscillation_count",
-        "oscillation_density",
-        "branch_bump_score",
-    ]
-    return pd.DataFrame(rows, columns=columns)
+    from tortuosite_score.vessels_detection.scoring import scoring_config, score_saved_vessels_for_run
+
+    return score_saved_vessels_for_run(run_dir, branches=branches, config=scoring_config("local_bump", settings or LocalBumpSettings()))
 
 
 def summarize_saved_vessel_eye_score(
     vessel_scores: pd.DataFrame,
     settings: LocalBumpSettings | None = None,
 ) -> dict[str, object]:
-    settings = settings or LocalBumpSettings()
-    eligible = vessel_scores[vessel_scores["eligible"]].copy() if "eligible" in vessel_scores else pd.DataFrame()
-    result: dict[str, object] = {
-        "saved_vessel_count": int(len(vessel_scores)),
-        "eligible_vessel_count": int(len(eligible)),
-        "eligible_total_length": float(eligible["vessel_length"].sum()) if not eligible.empty else 0.0,
-        "eye_tortuosity_score": math.nan,
-        "all_vessels_score": math.nan,
-        "all_vessels_tail_score": math.nan,
-        "artery_score": math.nan,
-        "vein_score": math.nan,
-        "current_arc_chord_score": math.nan,
-        "top_contributing_vessels": "[]",
-    }
-    if eligible.empty:
-        return result
+    from tortuosite_score.vessels_detection.scoring import scoring_config, summarize_eye_score
 
-    all_global = weighted_mean(eligible["vessel_bump_score"], eligible["vessel_length"])
-    all_tail = tail_weighted_mean(
-        eligible,
-        value_column="vessel_bump_score",
-        length_column="vessel_length",
-        tail_length_fraction=settings.tail_length_fraction,
-    )
-    final_score = settings.global_weight * all_global + settings.tail_weight * all_tail
-    result.update(
-        {
-            "eye_tortuosity_score": float(final_score * DISPLAY_SCALE),
-            "all_vessels_score": float(all_global * DISPLAY_SCALE),
-            "all_vessels_tail_score": float(all_tail * DISPLAY_SCALE),
-            "artery_score": _saved_vessel_category_score(eligible, "artere"),
-            "vein_score": _saved_vessel_category_score(eligible, "veine"),
-            "current_arc_chord_score": weighted_mean(
-                eligible["arc_chord_diagnostic"],
-                eligible["vessel_length"],
-            ),
-            "top_contributing_vessels": json.dumps(top_contributing_vessels(eligible)),
-        }
-    )
-    return result
+    return summarize_eye_score(vessel_scores, config=scoring_config("local_bump", settings or LocalBumpSettings()))
 
 
 def read_manual_review_state(run_dir: Path) -> dict[str, object]:
@@ -1052,6 +964,16 @@ def _empty_branch_metrics(branch_length: float = 0.0, chord_length: float = 0.0)
     }
 
 
+def _empty_curvature_squared_metrics(branch_length: float = 0.0, chord_length: float = 0.0) -> dict[str, float]:
+    del branch_length, chord_length
+    return {
+        "curvature_squared_score": 0.0,
+        "curvature_squared_integral": 0.0,
+        "mean_curvature": 0.0,
+        "max_curvature": 0.0,
+    }
+
+
 def _category_score(branches: pd.DataFrame, category: str) -> float:
     subset = branches[branches["category"] == category]
     if subset.empty:
@@ -1120,12 +1042,13 @@ def _category_from_pixels(artery_pixels: int, vein_pixels: int) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compute saved-vessel local-bump eye-level tortuosity from saved Streamlit runs.")
+    parser = argparse.ArgumentParser(description="Compute saved-vessel eye-level tortuosity from saved Streamlit runs.")
     parser.add_argument("runs_root", nargs="?", default="demo/streamlit_runs")
     parser.add_argument("--output", default="demo/local_bump_eye_scores.csv")
     parser.add_argument("--systems-output", "--vessels-output", dest="systems_output", default="demo/local_bump_vessel_scores.csv")
     parser.add_argument("--branches-output", default="demo/local_bump_branch_scores.csv")
     parser.add_argument("--include-all-runs", action="store_true")
+    parser.add_argument("--method", choices=["local_bump", "arc_chord", "curvature_squared"], default="local_bump")
     parser.add_argument("--min-branch-length", type=float, default=DEFAULT_MIN_BRANCH_LENGTH)
     parser.add_argument("--min-system-length", type=float, default=DEFAULT_MIN_SYSTEM_LENGTH)
     parser.add_argument("--resample-step", type=float, default=DEFAULT_RESAMPLE_STEP)
@@ -1136,6 +1059,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    from tortuosite_score.vessels_detection.scoring import scoring_config, score_runs as score_runs_with_method
+
     args = parse_args()
     settings = LocalBumpSettings(
         min_branch_length=args.min_branch_length,
@@ -1145,12 +1070,13 @@ def main() -> None:
         curvature_threshold=args.curvature_threshold,
         bridge_tolerance=args.bridge_tolerance,
     )
-    summary_df, _ = score_runs(
+    config = scoring_config(args.method, settings)
+    summary_df, _ = score_runs_with_method(
         args.runs_root,
         output_csv=args.output,
         branch_output_csv=args.branches_output,
-        system_output_csv=args.systems_output,
-        settings=settings,
+        vessel_output_csv=args.systems_output,
+        config=config,
         numbered_only=not args.include_all_runs,
     )
     if summary_df.empty:

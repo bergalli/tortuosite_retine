@@ -10,16 +10,17 @@ uv run streamlit run tortuosite_score/app/app.py
 
 Without `skan`, skeleton tortuosity uses a built-in scikit-image graph fallback (no LLVM/numba build required on Intel Mac).
 
-# Saved-vessel local-bump eye score
+# Saved-vessel tortuosity scoring
 
-Compute the saved-vessel local-bump tortuosity score from already saved Streamlit/VascX runs:
+Compute the saved-vessel tortuosity score from already saved Streamlit/VascX runs:
 
 ```bash
 uv run python -m tortuosite_score.vessels_detection.local_bump_score demo/streamlit_runs
 ```
 
-This writes `demo/local_bump_eye_scores.csv`, `demo/local_bump_vessel_scores.csv`, and a diagnostic `demo/local_bump_branch_scores.csv` without rerunning segmentation. The primary detail CSV contains saved vessels: vessels selected by hand and vessels created with the app's auto-complete button.
+This writes eye-level and saved-vessel score CSVs without rerunning segmentation. The primary detail CSV contains saved vessels: vessels selected by hand and vessels created with the app's auto-complete button.
 By default, the CLI and PDF report use the numbered `*_OD` / `*_OG` cohort when present, because those are the clinically labelled eyes. Use `--include-all-runs` to include legacy-style folders such as `OD_de_*`.
+The app sidebar now exposes the active scoring method globally; review tables, Results, PDF reports, and regenerated CSV exports all follow that same method.
 
 ## Method currently used in the app
 
@@ -34,10 +35,10 @@ So the final method does **not** score the whole skeleton directly. The whole-sk
 
 ## Where the new method replaced the old one
 
-- The Streamlit `Results` tab uses the saved-vessel local-bump score.
-- The PDF report uses the same saved-vessel local-bump score.
-- The CLI `tortuosite_score.vessels_detection.local_bump_score` uses the same saved-vessel local-bump score.
-- The old arc/chord tortuosity is kept only as a diagnostic value in manual review tables and CSV exports.
+- The Streamlit `Results` tab uses the active saved-vessel scoring method.
+- The PDF report uses the same active saved-vessel scoring method.
+- The CLI `tortuosite_score.vessels_detection.local_bump_score` accepts `--method` and uses the same centralized scoring service.
+- `Arc/chord` and `Courbure quadratique` can also be selected as primary methods; `Arc/chord` remains available as a diagnostic column.
 
 ## Scoring method
 
@@ -140,11 +141,29 @@ The older geometric tortuosity is still exported for diagnosis only:
 \text{arc/chord} = \frac{L_v}{\|\mathbf{p}_n - \mathbf{p}_0\|}
 \]
 
-It is no longer the primary score.
+It is no longer the default primary score.
+
+### Optional curvature-squared score
+
+The app can also use a direct curvature-energy score:
+
+\[
+Q_v = \frac{1}{L_v}\int_0^{L_v} \kappa(s)^2\,ds
+\]
+
+where \(s\) is arc length and the local curvature is estimated from the resampled, lightly smoothed centerline:
+
+\[
+\kappa(s) =
+\frac{|x'(s)y''(s)-y'(s)x''(s)|}{(x'(s)^2+y'(s)^2)^{3/2}}
+\]
+
+This score is displayed and aggregated as the raw mathematical value. The eye-level aggregation uses the same eligible saved vessels, length-weighted mean, and upper-tail component as the local-bump method.
 
 The current report score is project-specific and cohort-relative:
 
 - `Score local-bump`: final saved-vessel local-bump eye score.
+- `Score courbure^2`: optional raw curvature-squared eye score when that method is active.
 - `Score moyen`: length-weighted mean saved-vessel local-bump burden.
 - `Queue superieure`: upper-tail saved-vessel burden.
 - `Score comparatif`: cohort-normalized `Score local-bump`.

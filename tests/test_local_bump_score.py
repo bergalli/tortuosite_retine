@@ -13,12 +13,21 @@ from skimage.draw import line
 
 from tortuosite_score.vessels_detection.local_bump_score import (
     LocalBumpSettings,
+    curvature_squared_metrics,
     local_bump_metrics,
     score_run,
     score_saved_vessels,
     score_root_to_leaf_systems,
     summarize_eye_score,
 )
+from tortuosite_score.vessels_detection.scoring import (
+    available_scoring_methods,
+    build_manual_vessels_export,
+    build_review_scores_table,
+    scoring_config,
+    score_saved_vessel,
+)
+from tortuosite_score.vessels_detection.segments import VesselSegment, build_segment_map
 
 
 class LocalBumpMetricTests(unittest.TestCase):
@@ -52,6 +61,35 @@ class LocalBumpMetricTests(unittest.TestCase):
         bumpy_score = local_bump_metrics(bumpy, settings)
 
         self.assertLess(jitter_score["branch_bump_score"], bumpy_score["branch_bump_score"] * 0.25)
+
+    def test_curvature_squared_straight_line_scores_near_zero(self) -> None:
+        points = [[0, 0], [10, 0], [20, 0], [30, 0]]
+
+        score = curvature_squared_metrics(points, LocalBumpSettings(resample_step=1.0, smoothing_window=1))
+
+        self.assertAlmostEqual(score["curvature_squared_score"], 0.0)
+        self.assertAlmostEqual(score["curvature_squared_integral"], 0.0)
+        self.assertAlmostEqual(score["mean_curvature"], 0.0)
+        self.assertAlmostEqual(score["max_curvature"], 0.0)
+
+    def test_curvature_squared_circular_arc_matches_inverse_radius_squared(self) -> None:
+        radius = 50.0
+        theta = np.linspace(0, math.pi / 2.0, 120)
+        points = np.column_stack([radius * np.cos(theta), radius * np.sin(theta)])
+
+        score = curvature_squared_metrics(points, LocalBumpSettings(resample_step=1.0, smoothing_window=1))
+
+        self.assertAlmostEqual(score["curvature_squared_score"], 1.0 / (radius * radius), delta=8e-5)
+        self.assertAlmostEqual(score["mean_curvature"], 1.0 / radius, delta=2e-3)
+
+    def test_curvature_squared_short_or_degenerate_paths_return_safe_defaults(self) -> None:
+        short_score = curvature_squared_metrics([[0, 0]], LocalBumpSettings(resample_step=1.0, smoothing_window=1))
+        duplicate_score = curvature_squared_metrics([[0, 0], [0, 0]], LocalBumpSettings(resample_step=1.0, smoothing_window=1))
+
+        self.assertEqual(short_score["curvature_squared_score"], 0.0)
+        self.assertEqual(duplicate_score["curvature_squared_score"], 0.0)
+        self.assertTrue(math.isfinite(short_score["curvature_squared_integral"]))
+        self.assertTrue(math.isfinite(duplicate_score["curvature_squared_integral"]))
 
     def test_eye_summary_uses_tail_component(self) -> None:
         systems = pd.DataFrame(
@@ -225,6 +263,64 @@ class SavedRunSmokeTests(unittest.TestCase):
 
         self.assertEqual(len(scores), 1)
         self.assertFalse(bool(scores.loc[0, "eligible"]))
+
+
+class CentralScoringServiceTests(unittest.TestCase):
+    def test_method_registry_contains_arc_chord_and_local_bump(self) -> None:
+        methods = {method.method_id for method in available_scoring_methods()}
+
+        self.assertEqual(methods, {"local_bump", "arc_chord", "curvature_squared"})
+
+    def test_same_saved_vessel_can_be_scored_by_both_methods(self) -> None:
+        points = [[0, 0], [20, 6], [40, -6], [60, 6], [80, 0]]
+        segment = VesselSegment.from_manual_points(1, points)
+        segment_map = build_segment_map(pd.DataFrame(), {"1": segment.to_manual_payload()})
+        vessel = {
+            "category": "artere",
+            "segment_refs": [segment.ref],
+            "synthetic_links": [],
+            "start_endpoint": {"kind": "geometry_point", "point": points[0], "segment_ref": segment.ref, "distance_from_start": 0.0},
+            "end_endpoint": {"kind": "geometry_point", "point": points[-1], "segment_ref": segment.ref, "distance_from_start": segment.path_length},
+        }
+
+        arc_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("arc_chord"))
+        bump_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("local_bump"))
+        curvature_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("curvature_squared"))
+
+        self.assertEqual(arc_score["scoring_method"], "arc_chord")
+        self.assertEqual(bump_score["scoring_method"], "local_bump")
+        self.assertEqual(curvature_score["scoring_method"], "curvature_squared")
+        self.assertAlmostEqual(float(arc_score["arc_chord_diagnostic"]), float(arc_score["primary_score"]))
+        self.assertGreater(float(bump_score["local_bump_score"]), 0.0)
+        self.assertAlmostEqual(
+            float(curvature_score["curvature_squared_score"]),
+            float(curvature_score["primary_score"]),
+        )
+
+    def test_review_and_export_follow_active_scoring_method(self) -> None:
+        points = [[0, 0], [20, 6], [40, -6], [60, 6], [80, 0]]
+        branches = pd.DataFrame()
+        segment = VesselSegment.from_manual_points(1, points)
+        review_state = {
+            "manual_segments": {"1": segment.to_manual_payload()},
+            "vessels": {
+                "manual_1": {
+                    "category": "artere",
+                    "segment_refs": [segment.ref],
+                    "synthetic_links": [],
+                    "start_endpoint": {"kind": "geometry_point", "point": points[0], "segment_ref": segment.ref, "distance_from_start": 0.0},
+                    "end_endpoint": {"kind": "geometry_point", "point": points[-1], "segment_ref": segment.ref, "distance_from_start": segment.path_length},
+                }
+            },
+        }
+
+        review_table = build_review_scores_table(branches, review_state, config=scoring_config("curvature_squared"))
+        export_df = build_manual_vessels_export(branches, review_state, config=scoring_config("curvature_squared"))
+
+        self.assertEqual(review_table.loc[0, "Methode"], "Courbure quadratique")
+        self.assertEqual(export_df.loc[0, "scoring_method"], "curvature_squared")
+        self.assertEqual(export_df.loc[0, "primary_score_label"], "Score courbure^2")
+        self.assertIn("curvature_squared_score", export_df.columns)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,10 @@ from tortuosite_score.vessels_detection.dl_extra import (
     DEEP_INSTALL_HINT,
     deep_learning_available,
 )
+from tortuosite_score.vessels_detection.scoring import (
+    DEFAULT_SCORING_METHOD,
+    available_scoring_methods,
+)
 
 
 def render_sidebar_run_setup() -> dict:
@@ -22,6 +26,23 @@ def render_sidebar_run_setup() -> dict:
         )
         deep_available = deep_learning_available()
         method_options = ["deep", "classical"] if deep_available else ["classical"]
+        scoring_methods = available_scoring_methods()
+        scoring_method_ids = [method.method_id for method in scoring_methods]
+        default_scoring_index = (
+            scoring_method_ids.index(st.session_state.get("active_scoring_method", DEFAULT_SCORING_METHOD))
+            if st.session_state.get("active_scoring_method", DEFAULT_SCORING_METHOD) in scoring_method_ids
+            else 0
+        )
+        active_scoring_method = st.selectbox(
+            "Methode de score",
+            options=scoring_method_ids,
+            index=default_scoring_index,
+            format_func=lambda method_id: next(
+                method.label for method in scoring_methods if method.method_id == method_id
+            ),
+            help="Cette methode est appliquee partout: revue, resultats, PDF et CSV regeneres.",
+        )
+        st.session_state["active_scoring_method"] = active_scoring_method
         method = st.selectbox(
             "Methode de segmentation",
             options=method_options,
@@ -130,6 +151,7 @@ def render_sidebar_run_setup() -> dict:
         "vascx_closing_radius": vascx_closing_radius,
         "vascx_auto_create_vessels": vascx_auto_create_vessels,
         "vascx_auto_min_vessel_length": vascx_auto_min_vessel_length,
+        "active_scoring_method": active_scoring_method,
         "run_btn": run_btn,
     }
 
