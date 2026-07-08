@@ -325,6 +325,96 @@ def score_segments(
     }
 
 
+def ordered_points_for_segments(
+    segments: dict[str, VesselSegment],
+    selected_refs: list[str],
+    synthetic_links: list[dict[str, object]] | None = None,
+    start_endpoint: dict[str, object] | None = None,
+    end_endpoint: dict[str, object] | None = None,
+    join_tolerance: float = GEOMETRY_JOIN_TOLERANCE,
+) -> list[list[float]]:
+    selected = {
+        segment_ref: segments[segment_ref]
+        for segment_ref in sorted_unique_refs(selected_refs)
+        if segment_ref in segments
+    }
+    if not selected:
+        return []
+
+    graph = build_segment_graph(selected, synthetic_links or [], join_tolerance)
+    graph_nodes = graph["graph_nodes"]
+    adjacency = graph["adjacency"]
+    segment_nodes = graph["segment_nodes"]
+    components = graph["components"]
+    if not components:
+        return []
+
+    start = normalize_endpoint(start_endpoint)
+    end = normalize_endpoint(end_endpoint)
+    start_node = add_endpoint_node(start, selected, graph_nodes, adjacency, segment_nodes) if start else None
+    end_node = add_endpoint_node(end, selected, graph_nodes, adjacency, segment_nodes) if end else None
+    components = connected_components(adjacency)
+
+    if start_node is None or end_node is None or component_for_node(components, start_node) != component_for_node(components, end_node):
+        active_component = largest_component(components, adjacency)
+        start_node, end_node = endpoints_from_longest_path(active_component, adjacency)
+    if start_node is None or end_node is None:
+        return []
+
+    node_path = shortest_node_path(adjacency, start_node, end_node)
+    return points_for_node_path(node_path, graph_nodes, segment_nodes, selected)
+
+
+def points_for_node_path(
+    node_path: list[int],
+    graph_nodes: list[dict[str, object]],
+    segment_nodes: dict[str, list[int]],
+    segments: dict[str, VesselSegment],
+) -> list[list[float]]:
+    if not node_path:
+        return []
+    points = [[float(graph_nodes[node_path[0]]["point"][0]), float(graph_nodes[node_path[0]]["point"][1])]]
+    for start_node, end_node in zip(node_path[:-1], node_path[1:]):
+        segment_ref, start_index, end_index = segment_step_for_nodes(start_node, end_node, segment_nodes)
+        if segment_ref is None:
+            points.append([float(graph_nodes[end_node]["point"][0]), float(graph_nodes[end_node]["point"][1])])
+            continue
+        segment = segments.get(segment_ref)
+        if segment is None:
+            points.append([float(graph_nodes[end_node]["point"][0]), float(graph_nodes[end_node]["point"][1])])
+            continue
+        segment_points = [[float(x), float(y)] for x, y in segment.points]
+        if start_index < end_index:
+            step_points = segment_points[start_index + 1 : end_index + 1]
+        else:
+            step_points = list(reversed(segment_points[end_index:start_index]))
+        points.extend(step_points)
+    return remove_consecutive_duplicate_points(points)
+
+
+def segment_step_for_nodes(
+    start_node: int,
+    end_node: int,
+    segment_nodes: dict[str, list[int]],
+) -> tuple[str | None, int, int]:
+    for segment_ref, node_ids in segment_nodes.items():
+        for index, (node_a, node_b) in enumerate(zip(node_ids[:-1], node_ids[1:])):
+            if node_a == start_node and node_b == end_node:
+                return segment_ref, index, index + 1
+            if node_b == start_node and node_a == end_node:
+                return segment_ref, index + 1, index
+    return None, -1, -1
+
+
+def remove_consecutive_duplicate_points(points: list[list[float]]) -> list[list[float]]:
+    cleaned: list[list[float]] = []
+    for point in points:
+        if cleaned and distance(cleaned[-1], point) <= 1e-9:
+            continue
+        cleaned.append(point)
+    return cleaned
+
+
 def synthesize_segment_links(
     segments: dict[str, VesselSegment],
     selected_refs: list[str],
@@ -558,6 +648,32 @@ def shortest_paths(adjacency: dict[int, list[tuple[int, float]]], start_node: in
                 distances[neighbor] = candidate
                 heappush(heap, (candidate, neighbor))
     return distances
+
+
+def shortest_node_path(adjacency: dict[int, list[tuple[int, float]]], start_node: int, end_node: int) -> list[int]:
+    distances = {start_node: 0.0}
+    previous: dict[int, int] = {}
+    heap: list[tuple[float, int]] = [(0.0, start_node)]
+    while heap:
+        distance_so_far, current = heappop(heap)
+        if current == end_node:
+            break
+        if distance_so_far > distances.get(current, float("inf")):
+            continue
+        for neighbor, weight in adjacency.get(current, []):
+            candidate = distance_so_far + float(weight)
+            if candidate < distances.get(neighbor, float("inf")):
+                distances[neighbor] = candidate
+                previous[neighbor] = current
+                heappush(heap, (candidate, neighbor))
+    if end_node not in distances:
+        return []
+    path = [end_node]
+    current = end_node
+    while current != start_node:
+        current = previous[current]
+        path.append(current)
+    return list(reversed(path))
 
 
 def largest_component(components: list[set[int]], adjacency: dict[int, list[tuple[int, float]]]) -> set[int]:

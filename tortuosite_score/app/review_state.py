@@ -22,6 +22,15 @@ from tortuosite_score.vessels_detection.segments import (
     split_segment_refs,
     synthesize_segment_links,
 )
+from tortuosite_score.vessels_detection.local_bump_score import (
+    LocalBumpSettings,
+    build_system_graph,
+    category_mix_for_edges,
+    dominant_category,
+    local_bump_metrics,
+    points_for_node_edge_path,
+    root_to_leaf_paths,
+)
 
 SCHEMA_VERSION = 2
 
@@ -342,6 +351,68 @@ def build_auto_vascx_vessels(
                 "start_endpoint": create_geometry_endpoint(points[0], segment_ref, 0.0),
                 "end_endpoint": create_geometry_endpoint(points[-1], segment_ref, float(row["branch-distance"])),
             }
+    return vessels
+
+
+def replace_auto_completed_vessels(
+    review_state: dict,
+    branches_df: pd.DataFrame,
+    settings: LocalBumpSettings | None = None,
+    prefix: str = "auto_vascx",
+) -> int:
+    settings = settings or LocalBumpSettings()
+    review_state.setdefault("vessels", {})
+    review_state["vessels"] = {
+        vessel_name: vessel
+        for vessel_name, vessel in review_state["vessels"].items()
+        if not vessel_name.startswith(f"{prefix}_")
+    }
+    generated = build_auto_completed_vessels(branches_df, settings=settings, prefix=prefix)
+    review_state["vessels"].update(generated)
+    return len(generated)
+
+
+def build_auto_completed_vessels(
+    branches_df: pd.DataFrame,
+    settings: LocalBumpSettings | None = None,
+    prefix: str = "auto_vascx",
+) -> dict[str, dict]:
+    settings = settings or LocalBumpSettings()
+    graph = build_system_graph(branches_df, settings)
+    vessels: dict[str, dict] = {}
+    index = 1
+    for path in root_to_leaf_paths(graph):
+        path_points = points_for_node_edge_path(graph, path["node_path"], path["edge_ids"])
+        metrics = local_bump_metrics(path_points, settings)
+        if metrics["branch_length"] < settings.min_saved_vessel_length:
+            continue
+        branch_ids = [
+            graph["edges"][edge_id]["branch_id"]
+            for edge_id in path["edge_ids"]
+            if graph["edges"][edge_id].get("branch_id") is not None
+        ]
+        segment_refs = sorted_unique_refs([model_segment_ref(int(branch_id)) for branch_id in branch_ids])
+        if not segment_refs:
+            continue
+        synthetic_links = [
+            {
+                "points": graph["edges"][edge_id]["points"],
+                "length": graph["edges"][edge_id]["length"],
+                "display_length": graph["edges"][edge_id]["length"],
+            }
+            for edge_id in path["edge_ids"]
+            if graph["edges"][edge_id].get("is_bridge")
+        ]
+        category = dominant_category(category_mix_for_edges(graph, path["edge_ids"]))
+        vessels[f"{prefix}_{index}"] = {
+            "category": "veine" if category == "veine" else "artere",
+            "segment_refs": segment_refs,
+            "synthetic_links": synthetic_links,
+            "start_endpoint": create_geometry_endpoint(path_points[0]) if path_points else None,
+            "end_endpoint": create_geometry_endpoint(path_points[-1]) if path_points else None,
+            "source": "auto_vascx",
+        }
+        index += 1
     return vessels
 
 

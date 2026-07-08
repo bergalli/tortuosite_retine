@@ -22,6 +22,7 @@ from tortuosite_score.app.review_state import (
     push_selection_history,
     redo_selection,
     remove_manual_segment,
+    replace_auto_completed_vessels,
     score_vessel,
     segment_ref_sort_key,
     segment_refs_for_review_state,
@@ -38,6 +39,7 @@ from tortuosite_score.app.viewer_component import (
     build_vessel_labels,
     build_viewer_branches,
 )
+from tortuosite_score.vessels_detection.local_bump_score import load_saved_run_branches
 
 VIEWER_SELECTION_MODE_KEY = "viewer_selection_mode"
 SELECTION_HISTORY_LIMIT = 50
@@ -622,6 +624,14 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
         )
 
     with bottom_right:
+        _render_auto_complete_controls(
+            selected_run_dir,
+            branches_df,
+            review_state,
+            viewer_reset_key,
+            selection_undo_key,
+            selection_redo_key,
+        )
         _render_saved_vessels(
             selected_run_dir,
             branches_df,
@@ -638,16 +648,37 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
 
     vessel_df = build_vessel_scores_table(review_state, branches_df)
     if not vessel_df.empty:
-        st.subheader("Scores des vaisseaux sauvegardes")
+        st.subheader("Scores diagnostiques arc/corde des vaisseaux sauvegardes")
         st.dataframe(vessel_df, use_container_width=True, hide_index=True)
         st.download_button(
-            "Telecharger les scores des vaisseaux",
+            "Telecharger les scores diagnostiques des vaisseaux",
             data=vessel_df.to_csv(index=False).encode("utf-8"),
             file_name=f"{selected_run_name}_manual_vessels.csv",
             mime="text/csv",
         )
         if not vessel_df[vessel_df["Statut du pont"] == "partiel"].empty:
             st.warning("Certains vaisseaux contiennent encore des selections discontinues.")
+
+
+def _render_auto_complete_controls(
+    selected_run_dir,
+    branches_df: pd.DataFrame,
+    review_state: dict,
+    viewer_reset_key: str,
+    undo_key: str,
+    redo_key: str,
+) -> None:
+    st.subheader("Auto-completion VascX")
+    st.caption("Cree des vaisseaux sauvegardes complets a partir du squelette deja extrait, sans relancer VascX.")
+    if st.button("Auto-complete skeleton into saved vessels", use_container_width=True):
+        generation_branches = load_saved_run_branches(selected_run_dir)
+        created_count = replace_auto_completed_vessels(review_state, generation_branches)
+        review_state["selected_segment_refs"] = []
+        _clear_selection_history(undo_key, redo_key)
+        st.session_state[viewer_reset_key] += 1
+        persist_manual_review(selected_run_dir, review_state, branches_df)
+        st.success(f"{created_count} vaisseau(x) auto-complete(s) sauvegarde(s).")
+        st.rerun()
 
 
 def _render_vessel_draft(

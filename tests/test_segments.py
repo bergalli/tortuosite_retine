@@ -10,12 +10,14 @@ from tortuosite_score.vessels_detection.segments import (
     create_geometry_endpoint,
     manual_segment_ref,
     model_segment_ref,
+    ordered_points_for_segments,
     score_segments,
     segment_ref_sort_key,
     split_segment_refs,
     synthesize_segment_links,
 )
 from tortuosite_score.app.review_state import (
+    replace_auto_completed_vessels,
     push_selection_history,
     redo_selection,
     undo_selection,
@@ -123,6 +125,27 @@ class VesselSegmentTests(unittest.TestCase):
         self.assertTrue(math.isclose(score["length"], 30.0))
         self.assertTrue(math.isclose(score["chord"], 30.0))
 
+    def test_ordered_points_follow_saved_vessel_endpoints(self) -> None:
+        segment = VesselSegment.from_manual_points(1, [[0, 0], [10, 0], [20, 0]])
+        start = create_geometry_endpoint([20, 0], manual_segment_ref(1), 20.0)
+        end = create_geometry_endpoint([0, 0], manual_segment_ref(1), 0.0)
+
+        points = ordered_points_for_segments({segment.ref: segment}, [segment.ref], start_endpoint=start, end_endpoint=end)
+
+        self.assertEqual(points[0], [20.0, 0.0])
+        self.assertEqual(points[-1], [0.0, 0.0])
+
+    def test_ordered_points_preserve_curved_saved_vessel_geometry(self) -> None:
+        source_points = [[0, 0], [5, 8], [12, -4], [20, 6], [30, 0]]
+        segment = VesselSegment.from_manual_points(1, source_points)
+        start = create_geometry_endpoint(source_points[0], manual_segment_ref(1), 0.0)
+        end = create_geometry_endpoint(source_points[-1], manual_segment_ref(1), segment.path_length)
+
+        points = ordered_points_for_segments({segment.ref: segment}, [segment.ref], start_endpoint=start, end_endpoint=end)
+
+        self.assertEqual(points, [[float(x), float(y)] for x, y in source_points])
+        self.assertGreater(len(points), 2)
+
 
 class SelectionHistoryTests(unittest.TestCase):
     def test_push_records_previous_selection_and_clears_redo(self) -> None:
@@ -169,6 +192,35 @@ class SelectionHistoryTests(unittest.TestCase):
 
         self.assertEqual(undo_stack, [[], ["model:2"]])
         self.assertEqual(redo_stack, [])
+
+
+class AutoCompleteVesselTests(unittest.TestCase):
+    def test_auto_complete_preserves_manual_and_replaces_prior_auto(self) -> None:
+        branches = pd.DataFrame(
+            {
+                "branch_id": [0, 1],
+                "path_points": [
+                    [[0, 0], [120, 0]],
+                    [[120, 0], [240, 0]],
+                ],
+                "vascx_category": ["artere", "artere"],
+            }
+        )
+        branches.attrs["root_hint"] = (0.0, 0.0)
+        review_state = {
+            "manual_segments": {},
+            "vessels": {
+                "manual_keep": {"category": "veine", "segment_refs": ["model:0"], "synthetic_links": []},
+                "auto_vascx_99": {"category": "artere", "segment_refs": ["model:1"], "synthetic_links": []},
+            },
+        }
+
+        created = replace_auto_completed_vessels(review_state, branches)
+
+        self.assertGreaterEqual(created, 1)
+        self.assertIn("manual_keep", review_state["vessels"])
+        self.assertNotIn("auto_vascx_99", review_state["vessels"])
+        self.assertTrue(any(name.startswith("auto_vascx_") for name in review_state["vessels"]))
 
 
 if __name__ == "__main__":
