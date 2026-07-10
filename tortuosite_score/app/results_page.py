@@ -20,7 +20,7 @@ from tortuosite_score.app.review_state import (
     segment_ref_sort_key,
     segment_refs_for_vessel,
 )
-from tortuosite_score.vessels_detection.local_bump_score import add_comparative_hybrid_score
+from tortuosite_score.vessels_detection.local_bump_score import weighted_mean
 from tortuosite_score.vessels_detection.scoring import (
     ScoringConfig,
     scoring_config as build_scoring_config,
@@ -296,10 +296,6 @@ def _score_local_bump_report_runs(
         scored_runs.append((run_dir, summary, system_scores))
 
     summary_table = _build_local_bump_summary_table(scored_runs)
-    comparative_scores = dict(zip(summary_table.get("Image", []), summary_table.get("Score comparatif", []), strict=False))
-    for run_dir, summary, _system_scores in scored_runs:
-        if run_dir.name in comparative_scores:
-            summary["comparative_hybrid_score"] = comparative_scores[run_dir.name]
     return scoring_config, scored_runs, summary_table
 
 
@@ -308,11 +304,12 @@ def _generate_local_bump_results_pdf_from_scores(
     scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]],
     summary_table: pd.DataFrame,
 ) -> bytes:
+    raw_pvalue_matrix, adjusted_pvalue_matrix = _build_local_bump_pvalue_matrices(scored_runs)
     buffer = io.BytesIO()
     with PdfPages(buffer) as pdf:
         _add_local_bump_cover_page(pdf, summary_table, scoring_config)
-        _add_local_bump_method_page(pdf, scoring_config)
-        _add_local_bump_scores_page(pdf, summary_table)
+        _add_stats_pdf_page(pdf, raw_pvalue_matrix, adjusted_pvalue_matrix)
+        _add_local_bump_scores_page(pdf, summary_table, scoring_config)
         for run_dir, summary, system_scores in scored_runs:
             _add_local_bump_run_page(pdf, run_dir, summary, system_scores)
         _add_all_systems_pdf_pages(pdf, _build_all_systems_table(scored_runs))
@@ -376,7 +373,6 @@ def render_results_page(scoring_config: ScoringConfig | None = None) -> None:
                     "- Le score final est calcule uniquement sur ces vaisseaux sauvegardes.",
                     f"- La methode active est `{method.label}`.",
                     f"- {method.short_description}",
-                    "- `Arc/chord` reste visible seulement comme diagnostic.",
                 ]
             )
         )
@@ -422,35 +418,96 @@ def _endpoint_caption(endpoint: dict[str, object] | None) -> str:
 def _build_local_bump_summary_table(scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for run_dir, summary, _branch_scores in scored_runs:
+        descriptive_metrics = _descriptive_eye_metrics(_branch_scores, summary.get("scoring_method"))
         rows.append(
             {
                 "Image": run_dir.name,
                 "Oeil": summary.get("eye_number"),
                 "Methode": summary.get("scoring_method_label"),
-                "Score principal": summary.get("eye_tortuosity_score"),
-                "Score moyen": summary.get("all_vessels_score"),
-                "Queue superieure": summary.get("all_vessels_tail_score"),
-                "Arteres": summary.get("artery_score"),
-                "Veines": summary.get("vein_score"),
-                "Arc/chord diagnostic": summary.get("current_arc_chord_score"),
+                "Score median": descriptive_metrics["score_median"],
+                "Score moyen": descriptive_metrics["score_mean"],
+                "Score moyen pondere": descriptive_metrics["score_weighted_mean"],
                 "Vaisseaux retenus": summary.get("eligible_vessel_count"),
                 "Vaisseaux sauvegardes": summary.get("saved_vessel_count"),
-                "Longueur totale": summary.get("eligible_total_length"),
+                "Longueur totale vaisseaux": descriptive_metrics["saved_total_length"],
+                "Longueur totale vaisseaux retenus": descriptive_metrics["eligible_total_length"],
             }
         )
     if not rows:
         return pd.DataFrame()
-    table = add_comparative_hybrid_score(pd.DataFrame(rows).rename(columns={
-        "Score principal": "eye_tortuosity_score",
-        "Score moyen": "all_vessels_score",
-    }))
-    table = table.rename(columns={
-        "eye_tortuosity_score": "Score principal",
-        "all_vessels_score": "Score moyen",
-        "comparative_hybrid_score": "Score comparatif",
-    })
-    table = table.drop(columns=["system_component_norm", "saved_vessel_component_norm"], errors="ignore")
-    return table.sort_values("Score comparatif", ascending=False).reset_index(drop=True)
+    table = pd.DataFrame(rows)
+    return table.sort_values("Score moyen pondere", ascending=False, na_position="last").reset_index(drop=True)
+
+
+def _build_local_bump_pvalue_matrices(
+    scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    scores_by_image = {
+        run_dir.name: _eligible_primary_scores(system_scores)
+        for run_dir, _summary, system_scores in scored_runs
+    }
+    raw_matrix = build_pvalue_matrix(scores_by_image)
+    return raw_matrix, build_adjusted_pvalue_matrix(raw_matrix)
+
+
+def _eligible_primary_scores(system_scores: pd.DataFrame) -> list[float]:
+    eligible = _eligible_system_scores(system_scores)
+    if eligible.empty or "primary_score" not in eligible.columns:
+        return []
+    scores: list[float] = []
+    for value in eligible["primary_score"]:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            scores.append(numeric)
+    return scores
+
+
+def _eligible_system_scores(system_scores: pd.DataFrame) -> pd.DataFrame:
+    if system_scores.empty:
+        return pd.DataFrame()
+    if "eligible" not in system_scores.columns:
+        return system_scores.copy()
+    return system_scores[system_scores["eligible"]].copy()
+
+
+def _descriptive_eye_metrics(system_scores: pd.DataFrame, method_id: object) -> dict[str, float]:
+    method = scoring_method_spec(str(method_id or "local_bump"))
+    scale = float(method.eye_score_scale)
+    eligible = _eligible_system_scores(system_scores)
+    primary_scores = _eligible_primary_scores(system_scores)
+    saved_total_length = _column_total(system_scores, "vessel_length")
+    eligible_total_length = _column_total(eligible, "vessel_length")
+    if not primary_scores:
+        return {
+            "score_median": math.nan,
+            "score_mean": math.nan,
+            "score_weighted_mean": math.nan,
+            "saved_total_length": saved_total_length,
+            "eligible_total_length": eligible_total_length,
+        }
+    score_median = float(pd.Series(primary_scores).median()) * scale
+    score_mean = float(sum(primary_scores) / len(primary_scores)) * scale
+    score_weighted_mean = math.nan
+    if not eligible.empty and "primary_score" in eligible.columns and "vessel_length" in eligible.columns:
+        score_weighted_mean = float(weighted_mean(eligible["primary_score"], eligible["vessel_length"])) * scale
+    return {
+        "score_median": score_median,
+        "score_mean": score_mean,
+        "score_weighted_mean": score_weighted_mean,
+        "saved_total_length": saved_total_length,
+        "eligible_total_length": eligible_total_length,
+    }
+
+
+def _column_total(table: pd.DataFrame, column: str) -> float:
+    if table.empty or column not in table.columns:
+        return 0.0
+    numeric = pd.to_numeric(table[column], errors="coerce")
+    finite = numeric[numeric.notna()]
+    return float(finite.sum()) if not finite.empty else 0.0
 
 
 def _build_all_systems_table(scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]]) -> pd.DataFrame:
@@ -471,7 +528,6 @@ def _build_all_systems_table(scored_runs: list[tuple[Path, dict[str, object], pd
                     "Longueur": row.get("vessel_length"),
                     "Segments": row.get("segment_count"),
                     "Ponts": row.get("bridge_count"),
-                    "Arc/chord diagnostic": row.get("arc_chord_diagnostic"),
                     "Courbure^2 diagnostic": row.get("curvature_squared_score"),
                     "Oscillations": row.get("oscillation_count"),
                     "_run_dir": run_dir,
@@ -541,7 +597,28 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
     pdf.savefig(fig, bbox_inches="tight")
 
 
-def _add_local_bump_scores_page(pdf: PdfPages, summary_table: pd.DataFrame) -> None:
+def _local_bump_scores_pdf_table(summary_table: pd.DataFrame) -> pd.DataFrame:
+    ordered_columns = [
+        "Image",
+        "Oeil",
+        "Methode",
+        "Score median",
+        "Score moyen",
+        "Score moyen pondere",
+        "Vaisseaux sauvegardes",
+        "Vaisseaux retenus",
+        "Longueur totale vaisseaux",
+        "Longueur totale vaisseaux retenus",
+    ]
+    return summary_table[[column for column in ordered_columns if column in summary_table.columns]].copy()
+
+
+def _add_local_bump_scores_page(
+    pdf: PdfPages,
+    summary_table: pd.DataFrame,
+    scoring_config: ScoringConfig,
+) -> None:
+    method = scoring_method_spec(scoring_config.method_id)
     fig = Figure(figsize=(11.69, 8.27))
     ax = fig.subplots()
     ax.axis("off")
@@ -549,13 +626,14 @@ def _add_local_bump_scores_page(pdf: PdfPages, summary_table: pd.DataFrame) -> N
     ax.text(
         0.02,
         0.92,
-        "Les images sont triees par score comparatif. Ce score est calcule a partir des vaisseaux sauvegardes; "
-        "les colonnes voisines donnent les composantes brutes et diagnostiques.",
+        f"Ces statistiques descriptives sont calculees pour la methode `{method.label}` a partir des vaisseaux "
+        "retenus. Le tableau est trie par score moyen pondere; pour la comparaison principale entre yeux, les "
+        "p-values restent la sortie de reference.",
         va="top",
         fontsize=9,
         wrap=True,
     )
-    display = summary_table.copy()
+    display = _local_bump_scores_pdf_table(summary_table)
     if not display.empty:
         display = display.head(28)
     _draw_pdf_table(ax, display, title="", bbox=[0.02, 0.06, 0.96, 0.78])
@@ -568,6 +646,7 @@ def _add_local_bump_run_page(
     summary: dict[str, object],
     system_scores: pd.DataFrame,
 ) -> None:
+    descriptive_metrics = _descriptive_eye_metrics(system_scores, summary.get("scoring_method"))
     fig = Figure(figsize=(11.69, 8.27))
     axes = fig.subplots(1, 2, width_ratios=[1.1, 1.0])
     image_ax, text_ax = axes
@@ -584,19 +663,17 @@ def _add_local_bump_run_page(
     score_lines = [
         str(summary.get("scoring_method_label", "Score principal")),
         "",
-        f"Score final: {_format_pdf_value(summary.get('eye_tortuosity_score'))}",
-        f"Score comparatif: {_format_pdf_value(summary.get('comparative_hybrid_score'))}",
-        f"Score moyen: {_format_pdf_value(summary.get('all_vessels_score'))}",
-        f"Queue superieure: {_format_pdf_value(summary.get('all_vessels_tail_score'))}",
-        f"Arteres: {_format_pdf_value(summary.get('artery_score'))}",
-        f"Veines: {_format_pdf_value(summary.get('vein_score'))}",
-        f"Arc/chord diagnostic: {_format_pdf_value(summary.get('current_arc_chord_score'))}",
+        f"Score median: {_format_pdf_value(descriptive_metrics.get('score_median'))}",
+        f"Score moyen: {_format_pdf_value(descriptive_metrics.get('score_mean'))}",
+        f"Score moyen pondere: {_format_pdf_value(descriptive_metrics.get('score_weighted_mean'))}",
         f"Vaisseaux retenus: {summary.get('eligible_vessel_count', 0)}",
         f"Vaisseaux sauvegardes: {summary.get('saved_vessel_count', 0)}",
+        f"Longueur totale vaisseaux: {_format_pdf_value(descriptive_metrics.get('saved_total_length'))}",
+        f"Longueur totale vaisseaux retenus: {_format_pdf_value(descriptive_metrics.get('eligible_total_length'))}",
     ]
     text_ax.text(0.0, 0.98, "\n".join(score_lines), va="top", fontsize=11)
     top_table = _top_system_table(top_systems)
-    _draw_pdf_table(text_ax, top_table, title="Vaisseaux qui contribuent le plus", bbox=[0.0, 0.06, 1.0, 0.52])
+    _draw_pdf_table(text_ax, top_table, title="Vaisseaux ayant le plus haut score", bbox=[0.0, 0.06, 1.0, 0.52])
     pdf.savefig(fig, bbox_inches="tight")
 
 
@@ -634,8 +711,7 @@ def _add_all_systems_pdf_pages(pdf: PdfPages, all_systems_table: pd.DataFrame) -
             title = (
                 f"#{int(row.get('Rang', 0))}  {row.get('Image', 'NA')}  {row.get('Vaisseau', 'NA')}\n"
                 f"score {_format_pdf_value(row.get('Score vaisseau'))} | "
-                f"L {_format_pdf_value(row.get('Longueur'))} px | "
-                f"arc/chord {_format_pdf_value(row.get('Arc/chord diagnostic'))}"
+                f"L {_format_pdf_value(row.get('Longueur'))} px"
             )
             ax.set_title(title, fontsize=7.5, pad=2)
         for ax in flat_axes[len(page) :]:
@@ -736,13 +812,10 @@ def _top_system_table(top_systems: pd.DataFrame) -> pd.DataFrame:
         "primary_score",
         "vessel_length",
         "segment_count",
-        "bridge_count",
-        "arc_chord_diagnostic",
-        "curvature_squared_score",
-        "local_bump_energy",
-        "oscillation_count",
     ]
-    display = top_systems[[column for column in columns if column in top_systems.columns]].copy()
+    display = top_systems.sort_values("primary_score", ascending=False, na_position="last")[
+        [column for column in columns if column in top_systems.columns]
+    ].copy()
     return display.rename(
         columns={
             "highlight_label": "Label",
@@ -751,11 +824,6 @@ def _top_system_table(top_systems: pd.DataFrame) -> pd.DataFrame:
             "primary_score": "Score vaisseau",
             "vessel_length": "Longueur",
             "segment_count": "Segments",
-            "bridge_count": "Ponts",
-            "arc_chord_diagnostic": "Arc/chord",
-            "curvature_squared_score": "Courbure^2",
-            "local_bump_energy": "Energie locale",
-            "oscillation_count": "Oscillations",
         }
     )
 
@@ -837,14 +905,52 @@ def _add_cover_pdf_page(pdf: PdfPages, selected_run_names: list[str], counts_by_
 
 
 def _add_stats_pdf_page(pdf: PdfPages, raw_matrix: pd.DataFrame, adjusted_matrix: pd.DataFrame) -> None:
-    fig = Figure(figsize=(11.69, 8.27))
+    _add_stats_matrix_pdf_page(
+        pdf,
+        adjusted_matrix,
+        title="P-values ajustees (BH)",
+        explanation=STATS_EXPLANATION,
+    )
+    _add_stats_matrix_pdf_page(
+        pdf,
+        raw_matrix,
+        title="P-values brutes",
+        explanation=STATS_EXPLANATION,
+    )
+
+
+def _add_stats_matrix_pdf_page(
+    pdf: PdfPages,
+    matrix: pd.DataFrame,
+    title: str,
+    explanation: str,
+) -> None:
+    fig = Figure(figsize=(16.54, 11.69))
     ax = fig.subplots()
     ax.axis("off")
-    ax.text(0.02, 0.98, "Statistiques", va="top", fontsize=15, fontweight="bold")
-    ax.text(0.02, 0.91, STATS_EXPLANATION, va="top", fontsize=9, wrap=True)
-    _draw_pdf_table(ax, adjusted_matrix, title="P-values ajustees (BH)", bbox=[0.02, 0.47, 0.96, 0.30])
-    _draw_pdf_table(ax, raw_matrix, title="P-values brutes", bbox=[0.02, 0.08, 0.96, 0.30])
+    ax.text(0.02, 0.98, title, va="top", fontsize=17, fontweight="bold")
+    ax.text(0.02, 0.92, explanation, va="top", fontsize=9, wrap=True)
+    font_size = _stats_table_font_size(matrix)
+    _draw_pdf_table(
+        ax,
+        matrix,
+        title="",
+        bbox=[0.02, 0.05, 0.96, 0.80],
+        font_size=font_size,
+        y_scale=1.18,
+        colorizer=_pvalue_cell_color,
+        keep_single_line=True,
+    )
     pdf.savefig(fig, bbox_inches="tight")
+
+
+def _stats_table_font_size(matrix: pd.DataFrame) -> float:
+    max_dimension = max(len(matrix.columns), len(matrix.index), 1)
+    if max_dimension >= 24:
+        return 7.0
+    if max_dimension >= 18:
+        return 8.0
+    return 9.0
 
 
 def _add_segmentation_pdf_page(pdf: PdfPages, run_name: str, overlay: Image.Image, result_table: pd.DataFrame) -> None:
@@ -861,7 +967,16 @@ def _add_segmentation_pdf_page(pdf: PdfPages, run_name: str, overlay: Image.Imag
     pdf.savefig(fig, bbox_inches="tight")
 
 
-def _draw_pdf_table(ax, table_df: pd.DataFrame, title: str, bbox: list[float]) -> None:
+def _draw_pdf_table(
+    ax,
+    table_df: pd.DataFrame,
+    title: str,
+    bbox: list[float],
+    font_size: float | None = None,
+    y_scale: float = 1.18,
+    colorizer=None,
+    keep_single_line: bool = True,
+) -> None:
     if title:
         ax.text(bbox[0], bbox[1] + bbox[3] + 0.035, title, fontsize=11, fontweight="bold")
     if table_df.empty:
@@ -876,8 +991,62 @@ def _draw_pdf_table(ax, table_df: pd.DataFrame, title: str, bbox: list[float]) -
         bbox=bbox,
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(6.5 if len(display_df.columns) > 5 else 8)
-    table.scale(1.0, 1.18)
+    resolved_font_size = font_size if font_size is not None else (6.5 if len(display_df.columns) > 5 else 8)
+    table.set_fontsize(resolved_font_size)
+    table.scale(1.0, y_scale)
+    _style_pdf_table(table, display_df, colorizer=colorizer, keep_single_line=keep_single_line)
+
+
+def _style_pdf_table(table, display_df: pd.DataFrame, colorizer=None, keep_single_line: bool = False) -> None:
+    has_row_labels = display_df.index.name is not None
+    for (row, col), cell in table.get_celld().items():
+        text = cell.get_text()
+        if keep_single_line:
+            text.set_wrap(False)
+            text.set_text(_single_line_cell_text(text.get_text()))
+        if row == 0 or col == -1:
+            cell.set_facecolor("#f1f3f5")
+            text.set_fontweight("bold")
+            continue
+        if colorizer is None:
+            continue
+        data_row = row - 1
+        data_col = col if not has_row_labels else col
+        if data_row < 0 or data_row >= len(display_df.index) or data_col < 0 or data_col >= len(display_df.columns):
+            continue
+        cell.set_facecolor(colorizer(display_df.iloc[data_row, data_col]))
+
+
+def _single_line_cell_text(value: object, max_chars: int = 24) -> str:
+    text = str(value).replace("\n", " ").strip()
+    text = " ".join(text.split())
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 1]}…"
+
+
+def _pvalue_cell_color(value: object) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        if text in {"-", "NA"}:
+            return "#eceff1"
+        return "#ffffff"
+    if not math.isfinite(numeric):
+        return "#eceff1"
+    clipped = min(1.0, max(0.0, numeric))
+    if clipped <= 0.001:
+        return "#8b0000"
+    if clipped <= 0.01:
+        return "#d7301f"
+    if clipped <= 0.05:
+        return "#fc8d59"
+    if clipped <= 0.1:
+        return "#fee08b"
+    if clipped <= 0.5:
+        return "#d9ef8b"
+    return "#91cf60"
 
 
 def _format_table_for_display(table_df: pd.DataFrame) -> pd.DataFrame:

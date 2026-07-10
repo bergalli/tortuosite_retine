@@ -965,7 +965,10 @@ def _render_saved_vessels(
 
 def main() -> None:
     sidebar_values = render_sidebar_run_setup()
-    active_scoring_config = build_scoring_config(sidebar_values.get("active_scoring_method"))
+    active_scoring_config = build_scoring_config(
+        sidebar_values.get("active_scoring_method"),
+        sidebar_values.get("active_scoring_settings"),
+    )
     _handle_run_creation(sidebar_values)
     selected_run_name = _render_run_selector()
     if selected_run_name is None:

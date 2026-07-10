@@ -25,6 +25,8 @@ from tortuosite_score.vessels_detection.scoring import (
     build_manual_vessels_export,
     build_review_scores_table,
     scoring_config,
+    scoring_method_fixed_parameters,
+    summarize_eye_score as summarize_saved_eye_score,
     score_saved_vessel,
 )
 from tortuosite_score.vessels_detection.segments import VesselSegment, build_segment_map
@@ -90,6 +92,19 @@ class LocalBumpMetricTests(unittest.TestCase):
         self.assertEqual(duplicate_score["curvature_squared_score"], 0.0)
         self.assertTrue(math.isfinite(short_score["curvature_squared_integral"]))
         self.assertTrue(math.isfinite(duplicate_score["curvature_squared_integral"]))
+
+    def test_curvature_squared_resampling_can_be_disabled(self) -> None:
+        points = [[0, 0], [20, 6], [40, -6], [60, 6], [80, 0]]
+
+        raw_score = curvature_squared_metrics(points, LocalBumpSettings(resample_curvature_squared=False))
+        explicit_raw_score = curvature_squared_metrics(
+            points,
+            LocalBumpSettings(resample_step=25.0, resample_curvature_squared=False),
+        )
+        resampled_score = curvature_squared_metrics(points, LocalBumpSettings(resample_step=4.0))
+
+        self.assertEqual(raw_score, explicit_raw_score)
+        self.assertNotEqual(raw_score["curvature_squared_score"], resampled_score["curvature_squared_score"])
 
     def test_eye_summary_uses_tail_component(self) -> None:
         systems = pd.DataFrame(
@@ -297,6 +312,80 @@ class CentralScoringServiceTests(unittest.TestCase):
             float(curvature_score["primary_score"]),
         )
 
+    def test_short_vessel_filter_applies_to_all_scoring_methods_by_default(self) -> None:
+        points = [[0, 0], [20, 6], [40, -6], [60, 6], [80, 0]]
+        segment = VesselSegment.from_manual_points(1, points)
+        segment_map = build_segment_map(pd.DataFrame(), {"1": segment.to_manual_payload()})
+        vessel = {
+            "category": "artere",
+            "segment_refs": [segment.ref],
+            "synthetic_links": [],
+            "start_endpoint": {"kind": "geometry_point", "point": points[0], "segment_ref": segment.ref, "distance_from_start": 0.0},
+            "end_endpoint": {"kind": "geometry_point", "point": points[-1], "segment_ref": segment.ref, "distance_from_start": segment.path_length},
+        }
+        settings = LocalBumpSettings(min_saved_vessel_length=10_000.0)
+
+        bump_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("local_bump", settings))
+        arc_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("arc_chord", settings))
+        curvature_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("curvature_squared", settings))
+
+        self.assertFalse(bool(bump_score["eligible"]))
+        self.assertFalse(bool(arc_score["eligible"]))
+        self.assertFalse(bool(curvature_score["eligible"]))
+
+    def test_short_vessel_filter_can_be_disabled_for_all_scoring_methods(self) -> None:
+        points = [[0, 0], [20, 6], [40, -6], [60, 6], [80, 0]]
+        segment = VesselSegment.from_manual_points(1, points)
+        segment_map = build_segment_map(pd.DataFrame(), {"1": segment.to_manual_payload()})
+        vessel = {
+            "category": "artere",
+            "segment_refs": [segment.ref],
+            "synthetic_links": [],
+            "start_endpoint": {"kind": "geometry_point", "point": points[0], "segment_ref": segment.ref, "distance_from_start": 0.0},
+            "end_endpoint": {"kind": "geometry_point", "point": points[-1], "segment_ref": segment.ref, "distance_from_start": segment.path_length},
+        }
+        settings = LocalBumpSettings(min_saved_vessel_length=10_000.0, filter_short_vessels=False)
+
+        bump_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("local_bump", settings))
+        arc_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("arc_chord", settings))
+        curvature_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("curvature_squared", settings))
+
+        self.assertTrue(bool(bump_score["eligible"]))
+        self.assertTrue(bool(arc_score["eligible"]))
+        self.assertTrue(bool(curvature_score["eligible"]))
+
+    def test_parameter_free_eye_summaries_ignore_local_bump_aggregation_settings(self) -> None:
+        vessel_scores = pd.DataFrame(
+            {
+                "eligible": [False, True],
+                "primary_score": [1.0, 3.0],
+                "vessel_length": [10.0, 30.0],
+                "arc_chord_diagnostic": [1.0, 1.2],
+                "category": ["artere", "veine"],
+            }
+        )
+        default_summary = summarize_saved_eye_score(
+            vessel_scores,
+            scoring_config("curvature_squared", LocalBumpSettings(filter_short_vessels=False)),
+        )
+        extreme_summary = summarize_saved_eye_score(
+            vessel_scores,
+            scoring_config(
+                "curvature_squared",
+                LocalBumpSettings(
+                    min_saved_vessel_length=10_000.0,
+                    filter_short_vessels=False,
+                    tail_length_fraction=1.0,
+                    global_weight=0.0,
+                    tail_weight=1.0,
+                ),
+            ),
+        )
+
+        self.assertEqual(default_summary["eligible_vessel_count"], 2)
+        self.assertEqual(extreme_summary["eligible_vessel_count"], 2)
+        self.assertEqual(default_summary["eye_tortuosity_score"], extreme_summary["eye_tortuosity_score"])
+
     def test_review_and_export_follow_active_scoring_method(self) -> None:
         points = [[0, 0], [20, 6], [40, -6], [60, 6], [80, 0]]
         branches = pd.DataFrame()
@@ -321,6 +410,22 @@ class CentralScoringServiceTests(unittest.TestCase):
         self.assertEqual(export_df.loc[0, "scoring_method"], "curvature_squared")
         self.assertEqual(export_df.loc[0, "primary_score_label"], "Score courbure^2")
         self.assertIn("curvature_squared_score", export_df.columns)
+
+    def test_fixed_parameters_are_exposed_per_scoring_method(self) -> None:
+        local_bump_parameters = dict(scoring_method_fixed_parameters(scoring_config("local_bump")))
+        curvature_parameters = dict(scoring_method_fixed_parameters(scoring_config("curvature_squared")))
+        arc_chord_parameters = dict(scoring_method_fixed_parameters(scoring_config("arc_chord")))
+
+        self.assertIn("Seuil de courbure locale", local_bump_parameters)
+        self.assertIn("Pas de re-echantillonnage", local_bump_parameters)
+        self.assertEqual(
+            curvature_parameters,
+            {
+                "Filtre petits vaisseaux": "actif, longueur minimale 100 px",
+                "Pretraitement re-echantillonnage": "actif, pas 4.0 px",
+            },
+        )
+        self.assertEqual(arc_chord_parameters, {"Filtre petits vaisseaux": "actif, longueur minimale 100 px"})
 
 
 if __name__ == "__main__":

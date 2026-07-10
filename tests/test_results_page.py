@@ -5,6 +5,14 @@ import unittest
 import pandas as pd
 
 from tortuosite_score.app.results_page import (
+    _build_all_systems_table,
+    _build_local_bump_summary_table,
+    _build_local_bump_pvalue_matrices,
+    _local_bump_scores_pdf_table,
+    _pvalue_cell_color,
+    _single_line_cell_text,
+    _stats_table_font_size,
+    _top_system_table,
     build_adjusted_pvalue_matrix,
     build_pvalue_matrix,
     build_result_rows,
@@ -137,6 +145,201 @@ class ResultsPageTests(unittest.TestCase):
         self.assertTrue(pdf_bytes.startswith(b"%PDF"))
         self.assertGreater(len(pdf_bytes), 1000)
 
+    def test_local_bump_pvalue_matrices_use_eligible_primary_scores(self) -> None:
+        scored_runs = [
+            (
+                _fake_run_dir("eye_a"),
+                {},
+                pd.DataFrame(
+                    {
+                        "eligible": [True, False, True],
+                        "primary_score": [1.0, 9.9, 1.1],
+                    }
+                ),
+            ),
+            (
+                _fake_run_dir("eye_b"),
+                {},
+                pd.DataFrame(
+                    {
+                        "eligible": [True, True],
+                        "primary_score": [2.0, 2.1],
+                    }
+                ),
+            ),
+        ]
+
+        raw, adjusted = _build_local_bump_pvalue_matrices(scored_runs)
+
+        self.assertEqual(raw.index.tolist(), ["eye_a", "eye_b"])
+        self.assertEqual(raw.columns.tolist(), ["eye_a", "eye_b"])
+        self.assertEqual(raw.loc["eye_a", "eye_a"], "-")
+        self.assertGreater(float(raw.loc["eye_a", "eye_b"]), 0.5)
+        self.assertLess(float(raw.loc["eye_b", "eye_a"]), 0.5)
+        self.assertLessEqual(float(raw.loc["eye_b", "eye_a"]), float(adjusted.loc["eye_b", "eye_a"]))
+
+    def test_local_bump_scores_pdf_table_uses_descriptive_columns(self) -> None:
+        summary_table = pd.DataFrame(
+            {
+                "Image": ["eye_a"],
+                "Oeil": ["OD"],
+                "Methode": ["Score local-bump"],
+                "Score median": [1.3],
+                "Score moyen": [1.2],
+                "Score moyen pondere": [1.4],
+                "Vaisseaux retenus": [8],
+                "Vaisseaux sauvegardes": [10],
+                "Longueur totale vaisseaux": [300.0],
+                "Longueur totale vaisseaux retenus": [250.0],
+            }
+        )
+
+        display = _local_bump_scores_pdf_table(summary_table)
+
+        self.assertEqual(
+            display.columns.tolist(),
+            [
+                "Image",
+                "Oeil",
+                "Methode",
+                "Score median",
+                "Score moyen",
+                "Score moyen pondere",
+                "Vaisseaux sauvegardes",
+                "Vaisseaux retenus",
+                "Longueur totale vaisseaux",
+                "Longueur totale vaisseaux retenus",
+            ],
+        )
+
+    def test_top_system_table_keeps_columns_through_segments_only(self) -> None:
+        top_systems = pd.DataFrame(
+            {
+                "highlight_label": ["V1"],
+                "vessel_name": ["temporal"],
+                "category": ["artere"],
+                "primary_score": [2.3],
+                "vessel_length": [120.0],
+                "segment_count": [4],
+                "bridge_count": [1],
+                "arc_chord_diagnostic": [1.1],
+            }
+        )
+
+        display = _top_system_table(top_systems)
+
+        self.assertEqual(
+            display.columns.tolist(),
+            ["Label", "Vaisseau", "Categorie", "Score vaisseau", "Longueur", "Segments"],
+        )
+
+    def test_all_systems_table_hides_arc_chord_diagnostic(self) -> None:
+        scored_runs = [
+            (
+                _fake_run_dir("eye_a"),
+                {"eye_number": "OD"},
+                pd.DataFrame(
+                    {
+                        "eligible": [True],
+                        "vessel_name": ["temporal"],
+                        "category": ["artere"],
+                        "scoring_method_label": ["Local-bump"],
+                        "primary_score": [2.3],
+                        "vessel_length": [120.0],
+                        "segment_count": [4],
+                        "bridge_count": [1],
+                        "arc_chord_diagnostic": [1.1],
+                        "curvature_squared_score": [0.2],
+                        "oscillation_count": [3],
+                        "path_points": [[[0.0, 0.0], [1.0, 1.0]]],
+                    }
+                ),
+            )
+        ]
+
+        display = _build_all_systems_table(scored_runs)
+
+        self.assertNotIn("Arc/chord diagnostic", display.columns.tolist())
+
+    def test_local_bump_summary_table_sorts_by_weighted_mean(self) -> None:
+        scored_runs = [
+            (
+                _fake_run_dir("eye_a"),
+                {
+                    "eye_number": "OD",
+                    "scoring_method_label": "Local-bump",
+                    "scoring_method": "local_bump",
+                    "eligible_vessel_count": 2,
+                    "saved_vessel_count": 3,
+                },
+                pd.DataFrame(
+                    {
+                        "eligible": [True, True, False],
+                        "primary_score": [1.0, 3.0, 10.0],
+                        "vessel_length": [10.0, 30.0, 50.0],
+                    }
+                ),
+            ),
+            (
+                _fake_run_dir("eye_b"),
+                {
+                    "eye_number": "OG",
+                    "scoring_method_label": "Local-bump",
+                    "scoring_method": "local_bump",
+                    "eligible_vessel_count": 2,
+                    "saved_vessel_count": 2,
+                },
+                pd.DataFrame(
+                    {
+                        "eligible": [True, True],
+                        "primary_score": [2.0, 2.0],
+                        "vessel_length": [10.0, 10.0],
+                    }
+                ),
+            ),
+        ]
+
+        summary_table = _build_local_bump_summary_table(scored_runs)
+
+        self.assertEqual(summary_table["Image"].tolist(), ["eye_a", "eye_b"])
+        self.assertEqual(
+            summary_table.columns.tolist(),
+            [
+                "Image",
+                "Oeil",
+                "Methode",
+                "Score median",
+                "Score moyen",
+                "Score moyen pondere",
+                "Vaisseaux retenus",
+                "Vaisseaux sauvegardes",
+                "Longueur totale vaisseaux",
+                "Longueur totale vaisseaux retenus",
+            ],
+        )
+
+    def test_stats_table_font_size_shrinks_for_large_matrices(self) -> None:
+        matrix = pd.DataFrame(
+            [[f"{row}-{col}" for col in range(10)] for row in range(3)],
+            index=["r1", "r2", "r3"],
+            columns=[f"c{col}" for col in range(10)],
+        )
+
+        self.assertEqual(_stats_table_font_size(matrix), 9.0)
+        self.assertEqual(_stats_table_font_size(pd.DataFrame(columns=[f"c{col}" for col in range(18)])), 8.0)
+        self.assertEqual(_stats_table_font_size(pd.DataFrame(columns=[f"c{col}" for col in range(24)])), 7.0)
+
+    def test_pvalue_cell_color_marks_low_values_more_strongly(self) -> None:
+        self.assertEqual(_pvalue_cell_color("-"), "#eceff1")
+        self.assertEqual(_pvalue_cell_color("NA"), "#eceff1")
+        self.assertEqual(_pvalue_cell_color(0.001), "#8b0000")
+        self.assertEqual(_pvalue_cell_color(0.03), "#fc8d59")
+        self.assertEqual(_pvalue_cell_color(0.8), "#91cf60")
+
+    def test_single_line_cell_text_removes_line_breaks_and_truncates(self) -> None:
+        self.assertEqual(_single_line_cell_text("Longueur\ntotale"), "Longueur totale")
+        self.assertEqual(_single_line_cell_text("a" * 30, max_chars=10), "aaaaaaaaa…")
+
 
 def _write_tiny_png():
     from pathlib import Path
@@ -149,6 +352,12 @@ def _write_tiny_png():
     path = Path(tmp.name)
     Image.new("RGB", (20, 20), "black").save(path)
     return path
+
+
+def _fake_run_dir(name: str):
+    from pathlib import Path
+
+    return Path(name)
 
 
 if __name__ == "__main__":

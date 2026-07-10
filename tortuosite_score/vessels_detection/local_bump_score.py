@@ -50,6 +50,8 @@ class LocalBumpSettings:
     bridge_tolerance: float = DEFAULT_BRIDGE_TOLERANCE
     bridge_direction_cosine: float = DEFAULT_BRIDGE_DIRECTION_COSINE
     min_saved_vessel_length: float = DEFAULT_MIN_SAVED_VESSEL_LENGTH
+    filter_short_vessels: bool = True
+    resample_curvature_squared: bool = True
 
 
 def local_bump_metrics(
@@ -104,22 +106,23 @@ def curvature_squared_metrics(
     if branch_length <= 0:
         return _empty_curvature_squared_metrics(branch_length=branch_length, chord_length=chord_length)
 
-    resampled = resample_polyline(path, settings.resample_step)
-    smoothed = smooth_polyline(resampled, settings.smoothing_window)
-    if len(smoothed) < 3:
+    if settings.resample_curvature_squared:
+        path = resample_polyline(path, settings.resample_step)
+
+    if len(path) < 3:
         return _empty_curvature_squared_metrics(branch_length=branch_length, chord_length=chord_length)
 
-    segment_lengths = np.linalg.norm(np.diff(smoothed, axis=0), axis=1)
+    segment_lengths = np.linalg.norm(np.diff(path, axis=0), axis=1)
     s = np.concatenate([[0.0], np.cumsum(segment_lengths)])
     keep = np.concatenate([[True], np.diff(s) > 1e-9])
-    smoothed = smoothed[keep]
+    path = path[keep]
     s = s[keep]
-    if len(smoothed) < 3 or s[-1] <= 0:
+    if len(path) < 3 or s[-1] <= 0:
         return _empty_curvature_squared_metrics(branch_length=branch_length, chord_length=chord_length)
 
-    edge_order = 2 if len(smoothed) >= 3 else 1
-    dx = np.gradient(smoothed[:, 0], s, edge_order=edge_order)
-    dy = np.gradient(smoothed[:, 1], s, edge_order=edge_order)
+    edge_order = 2 if len(path) >= 3 else 1
+    dx = np.gradient(path[:, 0], s, edge_order=edge_order)
+    dy = np.gradient(path[:, 1], s, edge_order=edge_order)
     ddx = np.gradient(dx, s, edge_order=edge_order)
     ddy = np.gradient(dy, s, edge_order=edge_order)
     speed_squared = dx * dx + dy * dy
@@ -1055,6 +1058,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--smoothing-window", type=int, default=DEFAULT_SMOOTHING_WINDOW)
     parser.add_argument("--curvature-threshold", type=float, default=DEFAULT_CURVATURE_THRESHOLD)
     parser.add_argument("--bridge-tolerance", type=float, default=DEFAULT_BRIDGE_TOLERANCE)
+    parser.add_argument("--min-saved-vessel-length", type=float, default=DEFAULT_MIN_SAVED_VESSEL_LENGTH)
+    parser.add_argument("--no-filter-short-vessels", action="store_true")
+    parser.add_argument("--no-resample-curvature-squared", action="store_true")
     return parser.parse_args()
 
 
@@ -1069,6 +1075,9 @@ def main() -> None:
         smoothing_window=args.smoothing_window,
         curvature_threshold=args.curvature_threshold,
         bridge_tolerance=args.bridge_tolerance,
+        min_saved_vessel_length=args.min_saved_vessel_length,
+        filter_short_vessels=not args.no_filter_short_vessels,
+        resample_curvature_squared=not args.no_resample_curvature_squared,
     )
     config = scoring_config(args.method, settings)
     summary_df, _ = score_runs_with_method(

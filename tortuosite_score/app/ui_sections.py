@@ -10,9 +10,12 @@ from tortuosite_score.vessels_detection.dl_extra import (
     DEEP_INSTALL_HINT,
     deep_learning_available,
 )
+from tortuosite_score.vessels_detection.local_bump_score import LocalBumpSettings
 from tortuosite_score.vessels_detection.scoring import (
     DEFAULT_SCORING_METHOD,
     available_scoring_methods,
+    scoring_config,
+    scoring_method_fixed_parameters,
 )
 
 
@@ -43,6 +46,50 @@ def render_sidebar_run_setup() -> dict:
             help="Cette methode est appliquee partout: revue, resultats, PDF et CSV regeneres.",
         )
         st.session_state["active_scoring_method"] = active_scoring_method
+        filter_short_vessels = st.toggle(
+            "Filtrer les petits vaisseaux",
+            value=st.session_state.get("filter_short_vessels", True),
+            help="Exclut les vaisseaux sauvegardes trop courts du tableau de resultats et des p-values.",
+        )
+        st.session_state["filter_short_vessels"] = filter_short_vessels
+        min_saved_vessel_length = st.number_input(
+            "Longueur minimale vaisseau retenu",
+            min_value=0.0,
+            max_value=1000.0,
+            value=float(st.session_state.get("min_saved_vessel_length", 100.0)),
+            step=10.0,
+            disabled=not filter_short_vessels,
+            help="Seuil applique a toutes les methodes de score quand le filtre est actif.",
+        )
+        st.session_state["min_saved_vessel_length"] = min_saved_vessel_length
+        resample_curvature_squared = st.toggle(
+            "Re-echantillonner courbure quadratique",
+            value=st.session_state.get("resample_curvature_squared", True),
+            disabled=active_scoring_method != "curvature_squared",
+            help="Pretraitement numerique avant l'estimation des derivees de courbure. Active par defaut pour reduire l'effet escalier des pixels.",
+        )
+        st.session_state["resample_curvature_squared"] = resample_curvature_squared
+        curvature_resample_step = st.number_input(
+            "Pas de re-echantillonnage courbure",
+            min_value=0.5,
+            max_value=50.0,
+            value=float(st.session_state.get("curvature_resample_step", 4.0)),
+            step=0.5,
+            disabled=active_scoring_method != "curvature_squared" or not resample_curvature_squared,
+            help="Distance entre points apres re-echantillonnage pour la courbure quadratique.",
+        )
+        st.session_state["curvature_resample_step"] = curvature_resample_step
+        scoring_settings = LocalBumpSettings(
+            resample_step=float(curvature_resample_step) if active_scoring_method == "curvature_squared" else 4.0,
+            min_saved_vessel_length=float(min_saved_vessel_length),
+            filter_short_vessels=bool(filter_short_vessels),
+            resample_curvature_squared=bool(resample_curvature_squared),
+        )
+        active_scoring_config = scoring_config(active_scoring_method, scoring_settings)
+        parameter_lines = scoring_method_fixed_parameters(active_scoring_config)
+        if parameter_lines:
+            st.caption("Parametres actifs de la methode selectionnee")
+            st.markdown("\n".join(f"- {label}: `{value}`" for label, value in parameter_lines))
         method = st.selectbox(
             "Methode de segmentation",
             options=method_options,
@@ -152,6 +199,7 @@ def render_sidebar_run_setup() -> dict:
         "vascx_auto_create_vessels": vascx_auto_create_vessels,
         "vascx_auto_min_vessel_length": vascx_auto_min_vessel_length,
         "active_scoring_method": active_scoring_method,
+        "active_scoring_settings": scoring_settings,
         "run_btn": run_btn,
     }
 

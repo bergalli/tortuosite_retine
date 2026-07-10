@@ -143,6 +143,49 @@ def scoring_config(method_id: str | None = None, settings: LocalBumpSettings | N
     return ScoringConfig(method_id=normalized, local_bump_settings=settings or LocalBumpSettings())
 
 
+def scoring_method_fixed_parameters(config: ScoringConfig | None = None) -> list[tuple[str, str]]:
+    config = config or ScoringConfig()
+    settings = config.local_bump_settings
+    filter_label = (
+        f"actif, longueur minimale {settings.min_saved_vessel_length:.0f} px"
+        if settings.filter_short_vessels
+        else "desactive"
+    )
+    shared_parameters = [("Filtre petits vaisseaux", filter_label)]
+    if config.method_id == "local_bump":
+        return [
+            *shared_parameters,
+            ("Pas de re-echantillonnage", f"{settings.resample_step:.1f} px"),
+            ("Fenetre de lissage", f"{settings.smoothing_window} points"),
+            ("Seuil de courbure locale", f"{settings.curvature_threshold:.3f} rad"),
+        ]
+    if config.method_id == "curvature_squared":
+        resampling_label = (
+            f"actif, pas {settings.resample_step:.1f} px"
+            if settings.resample_curvature_squared
+            else "desactive"
+        )
+        return [
+            *shared_parameters,
+            ("Pretraitement re-echantillonnage", resampling_label),
+        ]
+    return shared_parameters
+
+
+def _is_saved_vessel_eligible(path_length: float, config: ScoringConfig) -> bool:
+    settings = config.local_bump_settings
+    if not settings.filter_short_vessels:
+        return True
+    return bool(path_length >= settings.min_saved_vessel_length)
+
+
+def _is_branch_fragment_eligible(branch_length: float, config: ScoringConfig) -> bool:
+    settings = config.local_bump_settings
+    if not settings.filter_short_vessels:
+        return True
+    return bool(branch_length >= settings.min_branch_length)
+
+
 def score_saved_vessel(
     segment_map: dict[str, object],
     vessel_name: str,
@@ -192,7 +235,7 @@ def score_saved_vessel(
         "primary_score_label": method.primary_score_label,
         "primary_score": primary_score,
         "display_name": method.primary_score_label,
-        "eligible": bool(path_length >= settings.min_saved_vessel_length),
+        "eligible": _is_saved_vessel_eligible(path_length, config),
         "vessel_length": path_length,
         "path_length": path_length,
         "chord_length": chord_length,
@@ -271,7 +314,12 @@ def summarize_eye_score(
     config = config or ScoringConfig()
     method = scoring_method_spec(config.method_id)
     settings = config.local_bump_settings
-    eligible = vessel_scores[vessel_scores["eligible"]].copy() if "eligible" in vessel_scores else pd.DataFrame()
+    if vessel_scores.empty:
+        eligible = pd.DataFrame()
+    elif config.local_bump_settings.filter_short_vessels and "eligible" in vessel_scores:
+        eligible = vessel_scores[vessel_scores["eligible"]].copy()
+    else:
+        eligible = vessel_scores.copy()
     result: dict[str, object] = {
         "scoring_method": method.method_id,
         "scoring_method_label": method.label,
@@ -291,13 +339,17 @@ def summarize_eye_score(
         return result
 
     all_global = weighted_mean(eligible["primary_score"], eligible["vessel_length"])
-    all_tail = tail_weighted_mean(
-        eligible,
-        value_column="primary_score",
-        length_column="vessel_length",
-        tail_length_fraction=settings.tail_length_fraction,
-    )
-    final_score = settings.global_weight * all_global + settings.tail_weight * all_tail
+    if config.method_id == "local_bump":
+        all_tail = tail_weighted_mean(
+            eligible,
+            value_column="primary_score",
+            length_column="vessel_length",
+            tail_length_fraction=settings.tail_length_fraction,
+        )
+        final_score = settings.global_weight * all_global + settings.tail_weight * all_tail
+    else:
+        all_tail = math.nan
+        final_score = all_global
     scale = method.eye_score_scale
     result.update(
         {
@@ -403,7 +455,7 @@ def score_branch_fragments(
                 "scoring_method": method.method_id,
                 "primary_score_label": method.primary_score_label,
                 "primary_score": primary_score,
-                "eligible": bool(metrics["branch_length"] >= settings.min_branch_length),
+                "eligible": _is_branch_fragment_eligible(float(metrics["branch_length"]), config),
                 **metrics,
                 **curvature_metrics,
             }
