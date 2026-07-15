@@ -8,6 +8,7 @@ from tortuosite_score.app.results_page import (
     _build_all_systems_table,
     _build_local_bump_summary_table,
     _build_local_bump_pvalue_matrices,
+    _kept_vessel_count_label,
     _local_bump_scores_pdf_table,
     _pvalue_cell_color,
     _single_line_cell_text,
@@ -19,6 +20,7 @@ from tortuosite_score.app.results_page import (
     generate_results_pdf,
     tortuosity_values,
     visible_result_table,
+    _wrapped_cell_text,
 )
 from tortuosite_score.vessels_detection.segments import create_geometry_endpoint
 
@@ -189,6 +191,7 @@ class ResultsPageTests(unittest.TestCase):
                 "Score moyen pondere": [1.4],
                 "Vaisseaux retenus": [8],
                 "Vaisseaux sauvegardes": [10],
+                "Vaisseaux retenus/sauvegardes": ["8/10"],
                 "Longueur totale vaisseaux": [300.0],
                 "Longueur totale vaisseaux retenus": [250.0],
             }
@@ -205,8 +208,7 @@ class ResultsPageTests(unittest.TestCase):
                 "Score median",
                 "Score moyen",
                 "Score moyen pondere",
-                "Vaisseaux sauvegardes",
-                "Vaisseaux retenus",
+                "Vaisseaux retenus/sauvegardes",
                 "Longueur totale vaisseaux",
                 "Longueur totale vaisseaux retenus",
             ],
@@ -313,10 +315,17 @@ class ResultsPageTests(unittest.TestCase):
                 "Score moyen pondere",
                 "Vaisseaux retenus",
                 "Vaisseaux sauvegardes",
+                "Vaisseaux retenus/sauvegardes",
                 "Longueur totale vaisseaux",
                 "Longueur totale vaisseaux retenus",
             ],
         )
+        self.assertEqual(summary_table.loc[0, "Vaisseaux retenus/sauvegardes"], "2/3")
+
+    def test_kept_vessel_count_label_formats_retained_over_saved(self) -> None:
+        self.assertEqual(_kept_vessel_count_label(8, 10), "8/10")
+        self.assertEqual(_kept_vessel_count_label("0", "0"), "0/0")
+        self.assertEqual(_kept_vessel_count_label(None, 10), "NA")
 
     def test_stats_table_font_size_shrinks_for_large_matrices(self) -> None:
         matrix = pd.DataFrame(
@@ -339,6 +348,16 @@ class ResultsPageTests(unittest.TestCase):
     def test_single_line_cell_text_removes_line_breaks_and_truncates(self) -> None:
         self.assertEqual(_single_line_cell_text("Longueur\ntotale"), "Longueur totale")
         self.assertEqual(_single_line_cell_text("a" * 30, max_chars=10), "aaaaaaaaa…")
+
+    def test_wrapped_cell_text_breaks_long_column_names(self) -> None:
+        self.assertEqual(
+            _wrapped_cell_text("Longueur totale vaisseaux retenus", line_width=14),
+            "Longueur\ntotale\nvaisseaux\nretenus",
+        )
+        self.assertEqual(
+            _wrapped_cell_text("Vaisseaux retenus/sauvegardes", line_width=14),
+            "Vaisseaux\nretenus/\nsauvegardes",
+        )
 
 
 def _write_tiny_png():

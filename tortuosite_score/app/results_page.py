@@ -24,6 +24,7 @@ from tortuosite_score.vessels_detection.local_bump_score import weighted_mean
 from tortuosite_score.vessels_detection.scoring import (
     ScoringConfig,
     scoring_config as build_scoring_config,
+    scoring_method_fixed_parameters,
     scoring_method_spec,
     score_run,
 )
@@ -33,7 +34,20 @@ VISIBLE_RESULT_COLUMNS = ["Label", "Vaisseau", "Categorie", "Longueur du trajet"
 STATS_EXPLANATION = (
     "Chaque cellule compare l'image en ligne a l'image en colonne. Une petite p-value indique des preuves que "
     "l'image en ligne a des valeurs de tortuosite plus elevees que l'image en colonne. Une grande p-value ne donne "
-    "pas de preuve forte dans ce sens. Les p-values ajustees sont a privilegier quand plusieurs yeux sont compares."
+    "pas de preuve forte dans ce sens."
+)
+RAW_PVALUE_EXPLANATION = (
+    "Chaque cellule compare l'image en ligne a l'image en colonne avec un test de Mann-Whitney unilateral "
+    "(alternative: la distribution des scores des vaisseaux retenus de la ligne est plus elevee que celle de la "
+    "colonne). Ces p-values brutes repondent donc a une question simple: l'oeil de la ligne a-t-il des scores "
+    "globalement plus eleves que l'oeil de la colonne ?"
+)
+BH_PVALUE_EXPLANATION = (
+    "BH signifie Benjamini-Hochberg. Dans une matrice avec N images, on ne lit pas une seule comparaison mais "
+    "N x (N - 1) comparaisons directionnelles. Plus on regarde de comparaisons, plus on augmente la chance de voir "
+    "une petite p-value par hasard. La correction BH transforme les p-values brutes en p-values ajustees pour une "
+    "lecture globale de la matrice. Si une seule comparaison avait ete definie a l'avance, la p-value brute serait "
+    "suffisante; ici, les p-values BH sont plus adaptees pour reperer les contrastes robustes dans tout le tableau."
 )
 SEGMENTATION_EXPLANATION = (
     "Chaque image montre l'oeil original avec les vaisseaux sauvegardes superposes. Les labels V1, V2, etc. "
@@ -84,6 +98,24 @@ LOCAL_BUMP_LITERATURE = [
     "Hervella et al., Medical & Biological Engineering & Computing, 2024: assessment explicable et aggregation globale.",
     "Ramos et al., BMC Medical Research Methodology, 2018: validation multi-experts et limites des mesures simples.",
 ]
+
+MODEL_DESCRIPTION_BY_METHOD = {
+    "arc_chord": [
+        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
+        "Pour chaque vaisseau, il reconstruit la ligne centrale ordonnee, mesure la longueur du trajet et la corde, puis calcule le rapport arc/chord.",
+        "Le seul pretraitement transversal est le filtre de petits vaisseaux si l'option est activee.",
+    ],
+    "curvature_squared": [
+        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
+        "Pour chaque vaisseau, il reconstruit la ligne centrale ordonnee puis applique la formule T = (1 / L) integral kappa(s)^2 ds.",
+        "Le re-echantillonnage, quand il est actif, est un pretraitement numerique avant l'estimation des derivees; il ne change pas la formule appliquee ensuite.",
+    ],
+    "local_bump": [
+        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
+        "Pour chaque vaisseau, il re-echantillonne et lisse la ligne centrale, mesure les changements locaux d'angle, ignore les variations sous le seuil actif, puis compte les alternances de courbure.",
+        "Le score est concu pour valoriser les petites bosses et oscillations locales plutot qu'un grand virage regulier unique.",
+    ],
+}
 
 
 def load_saved_review_state(run_dir: Path) -> dict:
@@ -308,6 +340,7 @@ def _generate_local_bump_results_pdf_from_scores(
     buffer = io.BytesIO()
     with PdfPages(buffer) as pdf:
         _add_local_bump_cover_page(pdf, summary_table, scoring_config)
+        _add_model_description_page(pdf, scoring_config, summary_table)
         _add_stats_pdf_page(pdf, raw_pvalue_matrix, adjusted_pvalue_matrix)
         _add_local_bump_scores_page(pdf, summary_table, scoring_config)
         for run_dir, summary, system_scores in scored_runs:
@@ -419,6 +452,8 @@ def _build_local_bump_summary_table(scored_runs: list[tuple[Path, dict[str, obje
     rows: list[dict[str, object]] = []
     for run_dir, summary, _branch_scores in scored_runs:
         descriptive_metrics = _descriptive_eye_metrics(_branch_scores, summary.get("scoring_method"))
+        eligible_count = summary.get("eligible_vessel_count")
+        saved_count = summary.get("saved_vessel_count")
         rows.append(
             {
                 "Image": run_dir.name,
@@ -427,8 +462,9 @@ def _build_local_bump_summary_table(scored_runs: list[tuple[Path, dict[str, obje
                 "Score median": descriptive_metrics["score_median"],
                 "Score moyen": descriptive_metrics["score_mean"],
                 "Score moyen pondere": descriptive_metrics["score_weighted_mean"],
-                "Vaisseaux retenus": summary.get("eligible_vessel_count"),
-                "Vaisseaux sauvegardes": summary.get("saved_vessel_count"),
+                "Vaisseaux retenus": eligible_count,
+                "Vaisseaux sauvegardes": saved_count,
+                "Vaisseaux retenus/sauvegardes": _kept_vessel_count_label(eligible_count, saved_count),
                 "Longueur totale vaisseaux": descriptive_metrics["saved_total_length"],
                 "Longueur totale vaisseaux retenus": descriptive_metrics["eligible_total_length"],
             }
@@ -437,6 +473,17 @@ def _build_local_bump_summary_table(scored_runs: list[tuple[Path, dict[str, obje
         return pd.DataFrame()
     table = pd.DataFrame(rows)
     return table.sort_values("Score moyen pondere", ascending=False, na_position="last").reset_index(drop=True)
+
+
+def _kept_vessel_count_label(eligible_count: object, saved_count: object) -> str:
+    try:
+        eligible = int(eligible_count)
+        saved = int(saved_count)
+    except (TypeError, ValueError):
+        return "NA"
+    if saved <= 0:
+        return f"{eligible}/0"
+    return f"{eligible}/{saved}"
 
 
 def _build_local_bump_pvalue_matrices(
@@ -570,6 +617,70 @@ def _add_local_bump_cover_page(pdf: PdfPages, summary_table: pd.DataFrame, scori
     pdf.savefig(fig, bbox_inches="tight")
 
 
+def _add_model_description_page(
+    pdf: PdfPages,
+    scoring_config: ScoringConfig,
+    summary_table: pd.DataFrame,
+) -> None:
+    method = scoring_method_spec(scoring_config.method_id)
+    fig = Figure(figsize=(8.27, 11.69))
+    ax = fig.subplots()
+    ax.axis("off")
+    ax.text(0.08, 0.94, "Modele et pretraitements", va="top", fontsize=16, fontweight="bold")
+
+    description_lines = MODEL_DESCRIPTION_BY_METHOD.get(method.method_id, MODEL_DESCRIPTION_BY_METHOD["local_bump"])
+    ax.text(
+        0.08,
+        0.86,
+        "\n".join(f"- {line}" for line in description_lines),
+        va="top",
+        fontsize=10,
+        wrap=True,
+    )
+
+    parameter_lines = scoring_method_fixed_parameters(scoring_config)
+    parameter_text = ["Parametres actifs:"] + [f"- {name}: {value}" for name, value in parameter_lines]
+    ax.text(0.08, 0.62, "\n".join(parameter_text), va="top", fontsize=10)
+
+    total_saved = _summary_column_total(summary_table, "Vaisseaux sauvegardes")
+    total_kept = _summary_column_total(summary_table, "Vaisseaux retenus")
+    if total_saved:
+        kept_line = f"Vaisseaux retenus pour les scores et p-values: {total_kept:.0f} / {total_saved:.0f}"
+    else:
+        kept_line = "Vaisseaux retenus pour les scores et p-values: NA"
+    ax.text(
+        0.08,
+        0.42,
+        "\n".join(
+            [
+                "Population analysee:",
+                kept_line,
+                "Les vaisseaux exclus par le filtre restent sauvegardes dans l'app, mais ne contribuent pas aux statistiques du rapport.",
+            ]
+        ),
+        va="top",
+        fontsize=10,
+        wrap=True,
+    )
+
+    ax.text(
+        0.08,
+        0.23,
+        "Sortie principale du rapport: les matrices de p-values comparent les distributions de scores des vaisseaux retenus entre images.",
+        va="top",
+        fontsize=10,
+        wrap=True,
+    )
+    pdf.savefig(fig, bbox_inches="tight")
+
+
+def _summary_column_total(summary_table: pd.DataFrame, column: str) -> float:
+    if summary_table.empty or column not in summary_table.columns:
+        return 0.0
+    numeric = pd.to_numeric(summary_table[column], errors="coerce")
+    return float(numeric.sum()) if numeric.notna().any() else 0.0
+
+
 def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) -> None:
     method = scoring_method_spec(scoring_config.method_id)
     settings = scoring_config.local_bump_settings
@@ -605,8 +716,7 @@ def _local_bump_scores_pdf_table(summary_table: pd.DataFrame) -> pd.DataFrame:
         "Score median",
         "Score moyen",
         "Score moyen pondere",
-        "Vaisseaux sauvegardes",
-        "Vaisseaux retenus",
+        "Vaisseaux retenus/sauvegardes",
         "Longueur totale vaisseaux",
         "Longueur totale vaisseaux retenus",
     ]
@@ -666,8 +776,8 @@ def _add_local_bump_run_page(
         f"Score median: {_format_pdf_value(descriptive_metrics.get('score_median'))}",
         f"Score moyen: {_format_pdf_value(descriptive_metrics.get('score_mean'))}",
         f"Score moyen pondere: {_format_pdf_value(descriptive_metrics.get('score_weighted_mean'))}",
-        f"Vaisseaux retenus: {summary.get('eligible_vessel_count', 0)}",
-        f"Vaisseaux sauvegardes: {summary.get('saved_vessel_count', 0)}",
+        "Vaisseaux retenus/sauvegardes: "
+        f"{_kept_vessel_count_label(summary.get('eligible_vessel_count'), summary.get('saved_vessel_count'))}",
         f"Longueur totale vaisseaux: {_format_pdf_value(descriptive_metrics.get('saved_total_length'))}",
         f"Longueur totale vaisseaux retenus: {_format_pdf_value(descriptive_metrics.get('eligible_total_length'))}",
     ]
@@ -907,15 +1017,15 @@ def _add_cover_pdf_page(pdf: PdfPages, selected_run_names: list[str], counts_by_
 def _add_stats_pdf_page(pdf: PdfPages, raw_matrix: pd.DataFrame, adjusted_matrix: pd.DataFrame) -> None:
     _add_stats_matrix_pdf_page(
         pdf,
-        adjusted_matrix,
-        title="P-values ajustees (BH)",
-        explanation=STATS_EXPLANATION,
+        raw_matrix,
+        title="P-values brutes",
+        explanation=f"{STATS_EXPLANATION}\n\n{RAW_PVALUE_EXPLANATION}",
     )
     _add_stats_matrix_pdf_page(
         pdf,
-        raw_matrix,
-        title="P-values brutes",
-        explanation=STATS_EXPLANATION,
+        adjusted_matrix,
+        title="P-values ajustees (BH)",
+        explanation=f"{STATS_EXPLANATION}\n\n{BH_PVALUE_EXPLANATION}",
     )
 
 
@@ -929,13 +1039,13 @@ def _add_stats_matrix_pdf_page(
     ax = fig.subplots()
     ax.axis("off")
     ax.text(0.02, 0.98, title, va="top", fontsize=17, fontweight="bold")
-    ax.text(0.02, 0.92, explanation, va="top", fontsize=9, wrap=True)
+    ax.text(0.02, 0.92, explanation, va="top", fontsize=8.2, wrap=True)
     font_size = _stats_table_font_size(matrix)
     _draw_pdf_table(
         ax,
         matrix,
         title="",
-        bbox=[0.02, 0.05, 0.96, 0.80],
+        bbox=[0.02, 0.05, 0.96, 0.68],
         font_size=font_size,
         y_scale=1.18,
         colorizer=_pvalue_cell_color,
@@ -1001,13 +1111,15 @@ def _style_pdf_table(table, display_df: pd.DataFrame, colorizer=None, keep_singl
     has_row_labels = display_df.index.name is not None
     for (row, col), cell in table.get_celld().items():
         text = cell.get_text()
-        if keep_single_line:
-            text.set_wrap(False)
-            text.set_text(_single_line_cell_text(text.get_text()))
         if row == 0 or col == -1:
             cell.set_facecolor("#f1f3f5")
             text.set_fontweight("bold")
+            text.set_wrap(True)
+            text.set_text(_wrapped_cell_text(text.get_text()))
             continue
+        if keep_single_line:
+            text.set_wrap(False)
+            text.set_text(_single_line_cell_text(text.get_text()))
         if colorizer is None:
             continue
         data_row = row - 1
@@ -1023,6 +1135,27 @@ def _single_line_cell_text(value: object, max_chars: int = 24) -> str:
     if len(text) <= max_chars:
         return text
     return f"{text[: max_chars - 1]}…"
+
+
+def _wrapped_cell_text(value: object, line_width: int = 13) -> str:
+    source = str(value).replace("\n", " ").replace("/", "/ ").strip()
+    words = source.split()
+    if not words:
+        return ""
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if not current:
+            current = word
+            continue
+        if len(current) + 1 + len(word) <= line_width:
+            current = f"{current} {word}"
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return "\n".join(lines)
 
 
 def _pvalue_cell_color(value: object) -> str:
