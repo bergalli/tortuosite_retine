@@ -9,10 +9,13 @@ from unittest.mock import patch
 import pandas as pd
 
 from tortuosite_score.vessels_detection.clinical_excel import (
+    CLASSIFIED_VESSEL_SHEET_NAMES,
     SHEET_NAMES,
     build_clinical_analysis_sheets,
     build_structured_vessel_data,
+    generate_classified_vessels_excel,
     generate_clinical_excel,
+    generate_clinical_excel_outputs,
     parse_run_name,
     parse_vessel_name,
 )
@@ -82,16 +85,14 @@ class ClinicalExcelTests(unittest.TestCase):
 
         self.assertIn("branche nasale", data["vessel_name"].tolist())
         self.assertIn("type_non_classe", quality["probleme"].tolist())
-        patient_vs_control = sheets["Patient_vs_temoin"]
-        self.assertIn("delta_patient_temoin", patient_vs_control.columns.tolist())
-        self.assertTrue((patient_vs_control["run_patient"] == "1_OD").any())
         self.assertIn("temoin_manquant", quality["probleme"].tolist())
-        od_vs_og = sheets["OD_vs_OG"]
-        self.assertIn("delta_OD_OG", od_vs_og.columns.tolist())
-        same_eye = sheets["Rangs_meme_oeil"]
-        self.assertEqual(same_eye.iloc[0]["section"], "resume")
-        self.assertIn("taille_effet_biserielle", same_eye.columns.tolist())
-        self.assertIn("detail_patient", same_eye["section"].tolist())
+        summary = sheets["Resume"]
+        self.assertEqual(summary["Comparaison"].tolist(), ["R3 vs R1", "R3 vs R2"])
+        self.assertIn("Conclusion", summary.columns.tolist())
+        per_eye = sheets["Par_oeil"]
+        self.assertEqual(per_eye["Run"].tolist(), ["1_OD", "1_OG"])
+        self.assertIn("R3_superieur_R1", per_eye.columns.tolist())
+        self.assertIn("R3_superieur_R2", per_eye.columns.tolist())
 
     def test_excel_export_contains_expected_sheets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,9 +109,126 @@ class ClinicalExcelTests(unittest.TestCase):
 
         workbook = pd.ExcelFile(io.BytesIO(excel_bytes))
         self.assertEqual(workbook.sheet_names, SHEET_NAMES)
-        structured = pd.read_excel(workbook, "Data_structuree")
-        self.assertIn("patient_id", structured.columns.tolist())
-        self.assertIn("score", structured.columns.tolist())
+        summary = pd.read_excel(workbook, "Resume")
+        per_eye = pd.read_excel(workbook, "Par_oeil")
+        self.assertEqual(summary["Comparaison"].tolist(), ["R3 vs R1", "R3 vs R2"])
+        self.assertIn("Score_R3", per_eye.columns.tolist())
+        self.assertIn("Delta_R3_R1", per_eye.columns.tolist())
+
+    def test_only_ranked_arteries_with_positive_length_are_analysis_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dirs = _make_run_dirs(root, ["1_OD"])
+            scores = pd.DataFrame(
+                {
+                    "eligible": [False, False, False, False],
+                    "vessel_name": ["1°A-inf", "VEINE TEMPORALE SUP", "branche nasale", "3°A-inf1"],
+                    "category": ["artere", "veine", "artere", "artere"],
+                    "primary_score": [1.0, 0.8, 0.7, float("nan")],
+                    "vessel_length": [40.0, 45.0, 50.0, 0.0],
+                    "scoring_method_label": ["Local-bump"] * 4,
+                }
+            )
+            with patch(
+                "tortuosite_score.vessels_detection.clinical_excel.score_run",
+                return_value=({}, scores),
+            ):
+                data, quality = build_structured_vessel_data(run_dirs, scoring_config(), root / "missing.csv")
+
+        eligibility = data.set_index("vessel_name")["eligible_analyse"].to_dict()
+        self.assertTrue(eligibility["1°A-inf"])
+        self.assertFalse(eligibility["VEINE TEMPORALE SUP"])
+        self.assertFalse(eligibility["branche nasale"])
+        self.assertFalse(eligibility["3°A-inf1"])
+        self.assertEqual(
+            data.set_index("vessel_name").loc["1°A-inf", "raison_exclusion_analyse"],
+            "",
+        )
+        self.assertEqual(
+            data.set_index("vessel_name").loc["branche nasale", "raison_exclusion_analyse"],
+            "unclassified_name",
+        )
+        self.assertEqual(
+            data.set_index("vessel_name").loc["VEINE TEMPORALE SUP", "raison_exclusion_analyse"],
+            "unclassified_name",
+        )
+        self.assertEqual(
+            data.set_index("vessel_name").loc["3°A-inf1", "raison_exclusion_analyse"],
+            "zero_length",
+        )
+        self.assertIn("vaisseau_court_conserve_nom_valide", quality["probleme"].tolist())
+
+    def test_classified_vessel_excel_separates_clean_and_rejected_vessels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dirs = _make_run_dirs(root, ["1_OD", "1_OG", "OD_de_1"])
+            with patch(
+                "tortuosite_score.vessels_detection.clinical_excel.score_run",
+                side_effect=lambda run_dir, config: ({}, _fake_scores(Path(run_dir).name)),
+            ):
+                excel_bytes = generate_classified_vessels_excel(run_dirs, scoring_config(), root / "missing.csv")
+
+        workbook = pd.ExcelFile(io.BytesIO(excel_bytes))
+        self.assertEqual(workbook.sheet_names, CLASSIFIED_VESSEL_SHEET_NAMES)
+        clean = pd.read_excel(workbook, "Clean_vessels")
+        rejected = pd.read_excel(workbook, "Rejected_vessels")
+        expected_columns = [
+            "patient_id",
+            "group",
+            "eye",
+            "run",
+            "vessel_name",
+            "class_number",
+            "vessel_type",
+            "rank",
+            "territory",
+            "length_raw_px",
+            "length_normalized_px",
+            "fundus_diameter_px",
+            "reference_diameter_px",
+            "normalization_factor",
+            "analysis_eligible",
+            "analysis_exclusion_reason",
+            "score_raw",
+            "score_normalized",
+        ]
+        self.assertEqual(
+            clean.columns.tolist(),
+            expected_columns,
+        )
+        self.assertEqual(rejected.columns.tolist(), expected_columns)
+        self.assertEqual(len(clean), 9)
+        self.assertEqual(len(rejected), 3)
+        self.assertTrue(clean["analysis_eligible"].all())
+        self.assertFalse(rejected["analysis_eligible"].any())
+        self.assertTrue(rejected["analysis_exclusion_reason"].notna().all())
+        self.assertEqual(set(clean["group"]), {"patient", "control"})
+        self.assertEqual(set(clean["eye"]), {"right", "left"})
+        self.assertIn("artery", set(clean["vessel_type"]))
+        self.assertIn("inferior", set(clean["territory"].dropna()))
+        self.assertNotIn("global_weight", clean.columns)
+        self.assertNotIn("high_tail_weight", clean.columns)
+
+    def test_combined_outputs_score_each_run_only_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dirs = _make_run_dirs(root, ["1_OD", "1_OG", "OD_de_1"])
+            with patch(
+                "tortuosite_score.vessels_detection.clinical_excel.score_run",
+                side_effect=lambda run_dir, config: ({}, _fake_scores(Path(run_dir).name)),
+            ) as mocked_score_run:
+                analysis_bytes, classified_bytes = generate_clinical_excel_outputs(
+                    run_dirs,
+                    scoring_config(),
+                    root / "missing.csv",
+                )
+
+        self.assertEqual(mocked_score_run.call_count, 3)
+        self.assertEqual(pd.ExcelFile(io.BytesIO(analysis_bytes)).sheet_names, SHEET_NAMES)
+        self.assertEqual(
+            pd.ExcelFile(io.BytesIO(classified_bytes)).sheet_names,
+            CLASSIFIED_VESSEL_SHEET_NAMES,
+        )
 
 
 def _make_run_dirs(root: Path, names: list[str]) -> list[Path]:
@@ -131,7 +249,7 @@ def _fake_scores(run_name: str) -> pd.DataFrame:
     }[run_name]
     return pd.DataFrame(
         {
-            "eligible": [True, True, True, True],
+            "eligible": [True, True, True, False],
             "vessel_name": ["1°A-inf", "2°A-sup1", "3°A-inf3", "branche nasale"],
             "category": ["artere", "artere", "artere", "unknown"],
             "primary_score": base_scores,

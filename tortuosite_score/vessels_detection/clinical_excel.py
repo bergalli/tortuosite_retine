@@ -17,16 +17,8 @@ from tortuosite_score.app.constants import PROJECT_ROOT
 from tortuosite_score.vessels_detection.scoring import ScoringConfig, score_run, scoring_method_spec
 
 CLINICAL_METADATA_PATH = PROJECT_ROOT / "demo" / "clinical_metadata.csv"
-SHEET_NAMES = [
-    "Data_structuree",
-    "Qualite_naming",
-    "Rangs_meme_oeil",
-    "Patient_vs_temoin",
-    "OD_vs_OG",
-    "Arteres_vs_veines",
-    "Correlation_age",
-    "Correlation_severite",
-]
+SHEET_NAMES = ["Resume", "Par_oeil"]
+CLASSIFIED_VESSEL_SHEET_NAMES = ["Clean_vessels", "Rejected_vessels"]
 
 
 @dataclass(frozen=True)
@@ -54,9 +46,39 @@ def generate_clinical_excel(
     clinical_metadata_path: Path = CLINICAL_METADATA_PATH,
 ) -> bytes:
     sheets = build_clinical_analysis_sheets(run_dirs, scoring_config, clinical_metadata_path)
+    return _write_excel(sheets, SHEET_NAMES)
+
+
+def generate_classified_vessels_excel(
+    run_dirs: list[Path],
+    scoring_config: ScoringConfig,
+    clinical_metadata_path: Path = CLINICAL_METADATA_PATH,
+) -> bytes:
+    data, _quality = build_structured_vessel_data(run_dirs, scoring_config, clinical_metadata_path)
+    sheets = build_classified_vessel_sheets(data)
+    return _write_excel(sheets, CLASSIFIED_VESSEL_SHEET_NAMES)
+
+
+def generate_clinical_excel_outputs(
+    run_dirs: list[Path],
+    scoring_config: ScoringConfig,
+    clinical_metadata_path: Path = CLINICAL_METADATA_PATH,
+) -> tuple[bytes, bytes]:
+    """Generate both workbooks while scoring and classifying every vessel once."""
+
+    data, quality = build_structured_vessel_data(run_dirs, scoring_config, clinical_metadata_path)
+    analysis_sheets = _analysis_sheets_from_structured(data, quality)
+    classified_sheets = build_classified_vessel_sheets(data)
+    return (
+        _write_excel(analysis_sheets, SHEET_NAMES),
+        _write_excel(classified_sheets, CLASSIFIED_VESSEL_SHEET_NAMES),
+    )
+
+
+def _write_excel(sheets: dict[str, pd.DataFrame], sheet_names: list[str]) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        for sheet_name in SHEET_NAMES:
+        for sheet_name in sheet_names:
             table = sheets.get(sheet_name, pd.DataFrame())
             table.to_excel(writer, sheet_name=sheet_name, index=False)
             _format_excel_sheet(writer.book[sheet_name], table)
@@ -84,6 +106,109 @@ def _format_excel_sheet(worksheet, table: pd.DataFrame) -> None:
                 for cell in worksheet[row_index]:
                     cell.fill = summary_fill
                     cell.font = Font(bold=True)
+    if worksheet.title == "Resume":
+        worksheet.freeze_panes = "A2"
+        for row in worksheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+        for row_index in range(2, worksheet.max_row + 1):
+            worksheet.row_dimensions[row_index].height = 72
+    if worksheet.title == "Par_oeil":
+        positive_fill = PatternFill("solid", fgColor="E2F0D9")
+        negative_fill = PatternFill("solid", fgColor="FCE4D6")
+        missing_fill = PatternFill("solid", fgColor="E7E6E6")
+        headers = {cell.value: cell.column for cell in worksheet[1]}
+        for column_name in ["Score_R1", "Score_R2", "Score_R3", "Delta_R3_R1", "Delta_R3_R2"]:
+            if column_name in headers:
+                for row_index in range(2, worksheet.max_row + 1):
+                    worksheet.cell(row_index, headers[column_name]).number_format = "0.00"
+        for column_name in ["R3_superieur_R1", "R3_superieur_R2", "R1_R2_R3_disponibles"]:
+            if column_name not in headers:
+                continue
+            for row_index in range(2, worksheet.max_row + 1):
+                cell = worksheet.cell(row_index, headers[column_name])
+                cell.fill = positive_fill if cell.value == "Oui" else negative_fill if cell.value == "Non" else missing_fill
+                cell.alignment = Alignment(horizontal="center")
+
+
+def build_classified_vessel_sheets(data: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    long_format = _classified_long_format(data)
+    if long_format.empty:
+        return {
+            "Clean_vessels": long_format.copy(),
+            "Rejected_vessels": long_format.copy(),
+        }
+    eligible = long_format["analysis_eligible"].fillna(False).astype(bool)
+    return {
+        "Clean_vessels": long_format[eligible].reset_index(drop=True),
+        "Rejected_vessels": long_format[~eligible].reset_index(drop=True),
+    }
+
+
+def _classified_long_format(data: pd.DataFrame) -> pd.DataFrame:
+    if data.empty:
+        return pd.DataFrame(columns=_raw_export_columns())
+    table = data.copy()
+    rank_label = table["rang"].apply(lambda value: f"R{int(value)}" if pd.notna(value) else "sans_rang")
+    territory_label = table["territoire"].fillna("sans_territoire").replace("", "sans_territoire")
+    table["classe_vaisseau"] = table["type_vaisseau"].fillna("unknown") + "_" + rank_label + "_" + territory_label
+    table = table.sort_values(
+        ["patient_id", "groupe", "oeil", "run", "type_vaisseau", "rang", "territoire", "vessel_name_normalise"],
+        na_position="last",
+    ).reset_index(drop=True)
+    table["numero_dans_classe"] = table.groupby(["run", "classe_vaisseau"], dropna=False).cumcount() + 1
+    table = table.rename(
+        columns={
+            "groupe": "group",
+            "oeil": "eye",
+            "numero_dans_classe": "class_number",
+            "rang": "rank",
+            "type_vaisseau": "vessel_type",
+            "territoire": "territory",
+            "score_brut": "score_raw",
+            "score": "score_normalized",
+            "longueur_brute_px": "length_raw_px",
+            "longueur": "length_normalized_px",
+            "facteur_normalisation": "normalization_factor",
+            "diametre_fond_oeil_px": "fundus_diameter_px",
+            "diametre_reference_px": "reference_diameter_px",
+            "eligible_analyse": "analysis_eligible",
+            "raison_exclusion_analyse": "analysis_exclusion_reason",
+        }
+    )
+    table["group"] = table["group"].replace({"temoin": "control"})
+    table["eye"] = table["eye"].replace({"OD": "right", "OG": "left"})
+    table["vessel_type"] = table["vessel_type"].replace({"artere": "artery", "veine": "vein"})
+    table["territory"] = table["territory"].replace({"inf": "inferior", "sup": "superior"})
+    return table[_raw_export_columns()]
+
+
+def _raw_export_columns() -> list[str]:
+    return [
+        # Subject and eye characteristics.
+        "patient_id",
+        "group",
+        "eye",
+        # Original identifiers.
+        "run",
+        "vessel_name",
+        # Derived clinical classification.
+        "class_number",
+        "vessel_type",
+        "rank",
+        "territory",
+        # Measured and normalization values.
+        "length_raw_px",
+        "length_normalized_px",
+        "fundus_diameter_px",
+        "reference_diameter_px",
+        "normalization_factor",
+        "analysis_eligible",
+        "analysis_exclusion_reason",
+        # Final score values.
+        "score_raw",
+        "score_normalized",
+    ]
 
 
 def build_clinical_analysis_sheets(
@@ -92,17 +217,12 @@ def build_clinical_analysis_sheets(
     clinical_metadata_path: Path = CLINICAL_METADATA_PATH,
 ) -> dict[str, pd.DataFrame]:
     data, quality = build_structured_vessel_data(run_dirs, scoring_config, clinical_metadata_path)
+    return _analysis_sheets_from_structured(data, quality)
+
+
+def _analysis_sheets_from_structured(data: pd.DataFrame, _quality: pd.DataFrame) -> dict[str, pd.DataFrame]:
     rank_scores = _rank_eye_scores(data)
-    return {
-        "Data_structuree": data,
-        "Qualite_naming": quality,
-        "Rangs_meme_oeil": _same_eye_rank_sheet(rank_scores),
-        "Patient_vs_temoin": _patient_vs_control_sheet(rank_scores),
-        "OD_vs_OG": _od_vs_og_sheet(rank_scores),
-        "Arteres_vs_veines": _arteries_vs_veins_sheet(data),
-        "Correlation_age": _correlation_sheet(rank_scores, data, "age"),
-        "Correlation_severite": _correlation_sheet(rank_scores, data, "severite"),
-    }
+    return _readable_same_eye_rank_sheets(rank_scores)
 
 
 def build_structured_vessel_data(
@@ -143,7 +263,16 @@ def build_structured_vessel_data(
             vessel_info = parse_vessel_name(vessel_name, score_row.get("category"))
             clinical_values = _clinical_values(clinical_by_patient, run_info.patient_id)
             score = _finite_float(score_row.get("primary_score"))
+            raw_score = _finite_float(score_row.get("raw_primary_score", score_row.get("primary_score")))
             length = _finite_float(score_row.get("vessel_length"))
+            length_eligible = bool(score_row.get("meets_length_threshold", score_row.get("eligible", True)))
+            analysis_eligible, exclusion_reason = analysis_vessel_eligibility(
+                vessel_name,
+                score_row.get("category"),
+                length,
+            )
+            valid_clinical_name = _is_ranked_artery(vessel_info)
+            usable_geometry = math.isfinite(length) and length > 0
             rows.append(
                 {
                     "patient_id": run_info.patient_id,
@@ -155,13 +284,18 @@ def build_structured_vessel_data(
                     "rang": vessel_info.rank,
                     "type_vaisseau": vessel_info.vessel_type,
                     "territoire": vessel_info.territory,
+                    "score_brut": raw_score * scale if math.isfinite(raw_score) else math.nan,
                     "score": score * scale if math.isfinite(score) else math.nan,
                     "longueur": length,
                     "longueur_brute_px": _finite_float(score_row.get("raw_vessel_length")),
                     "facteur_normalisation": _finite_float(score_row.get("coordinate_scale")),
                     "diametre_fond_oeil_px": _finite_float(score_row.get("fundus_diameter_px")),
                     "diametre_reference_px": _finite_float(score_row.get("reference_fundus_diameter_px")),
-                    "eligible": bool(score_row.get("eligible", True)),
+                    "eligible": length_eligible,
+                    "eligible_filtre_longueur": length_eligible,
+                    "nom_clinique_valide": valid_clinical_name,
+                    "eligible_analyse": analysis_eligible,
+                    "raison_exclusion_analyse": exclusion_reason,
                     "methode_id": method.method_id,
                     "methode": score_row.get("scoring_method_label"),
                     "poids_global": scoring_config.local_bump_settings.global_weight,
@@ -173,13 +307,31 @@ def build_structured_vessel_data(
             )
             if vessel_info.issue:
                 quality_rows.append(_quality_row(run_info, vessel_name, vessel_info.issue, "Nom de vaisseau a verifier"))
-            if not bool(score_row.get("eligible", True)):
+            if not length_eligible and valid_clinical_name and usable_geometry:
                 quality_rows.append(
                     _quality_row(
                         run_info,
                         vessel_name,
-                        "vaisseau_exclu_longueur",
-                        f"Longueur normalisee {length:.1f} sous le seuil actif",
+                        "vaisseau_court_conserve_nom_valide",
+                        f"Longueur normalisee {length:.1f}; conserve car le nom permet une classification clinique",
+                    )
+                )
+            elif not usable_geometry:
+                quality_rows.append(
+                    _quality_row(
+                        run_info,
+                        vessel_name,
+                        "vaisseau_exclu_longueur_nulle",
+                        "Longueur nulle ou non calculable",
+                    )
+                )
+            elif not analysis_eligible:
+                quality_rows.append(
+                    _quality_row(
+                        run_info,
+                        vessel_name,
+                        "vaisseau_exclu_nom_non_classe",
+                        "Nom non classe comme artere de rang 1, 2 ou 3",
                     )
                 )
 
@@ -238,6 +390,27 @@ def parse_vessel_name(vessel_name: str, category: object | None = None) -> Vesse
     return VesselNameInfo(vessel_name, normalized, rank if vessel_type == "artere" else None, vessel_type, territory, is_ambiguous, issue)
 
 
+def _is_ranked_artery(vessel: VesselNameInfo) -> bool:
+    if vessel.is_ambiguous:
+        return False
+    return vessel.vessel_type == "artere" and vessel.rank in {1, 2, 3}
+
+
+def analysis_vessel_eligibility(
+    vessel_name: str,
+    category: object | None,
+    vessel_length: object,
+) -> tuple[bool, str]:
+    """Return the exact eligibility and exclusion reason used by Clean_vessels."""
+
+    length = _finite_float(vessel_length)
+    if not math.isfinite(length) or length <= 0:
+        return False, "zero_length"
+    if not _is_ranked_artery(parse_vessel_name(vessel_name, category)):
+        return False, "unclassified_name"
+    return True, ""
+
+
 def _artery_rank(original_name: str, normalized: str) -> int | None:
     original = original_name.lower()
     patterns = [
@@ -251,6 +424,152 @@ def _artery_rank(original_name: str, normalized: str) -> int | None:
             if match:
                 return int(match.group(match.lastindex))
     return None
+
+
+def _readable_same_eye_rank_sheets(rank_scores: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    patient_scores = rank_scores[rank_scores["groupe"] == "patient"].copy() if not rank_scores.empty else pd.DataFrame()
+    eye_table = _rank_pivot(patient_scores, ["patient_id", "oeil", "run"])
+    if eye_table.empty:
+        return {
+            "Resume": pd.DataFrame(
+                [
+                    {
+                        "Question": "Les arteres de rang 3 sont-elles plus tortueuses que celles de rang 1 et 2 dans un meme oeil ?",
+                        "Conclusion": "Donnees insuffisantes",
+                    }
+                ]
+            ),
+            "Par_oeil": pd.DataFrame(),
+        }
+
+    eye_table["delta_R3_R1"] = eye_table["score_rang_3"] - eye_table["score_rang_1"]
+    eye_table["delta_R3_R2"] = eye_table["score_rang_3"] - eye_table["score_rang_2"]
+    eye_table["R3_superieur_R1"] = eye_table["delta_R3_R1"].apply(_yes_no_missing)
+    eye_table["R3_superieur_R2"] = eye_table["delta_R3_R2"].apply(_yes_no_missing)
+    eye_table["donnees_completes_R1_R2_R3"] = eye_table[["score_rang_1", "score_rang_2", "score_rang_3"]].notna().all(axis=1).map({True: "Oui", False: "Non"})
+
+    summary_rows: list[dict[str, object]] = []
+    comparison_specs = [
+        (1, "R3 versus R1", "score_rang_1", "delta_R3_R1"),
+        (2, "R3 versus R2", "score_rang_2", "delta_R3_R2"),
+    ]
+    paired_results: list[dict[str, object]] = []
+    for rank, label, comparator_column, delta_column in comparison_specs:
+        eye_pairs = eye_table.dropna(subset=["score_rang_3", comparator_column]).copy()
+        patient_pairs = (
+            eye_pairs.groupby("patient_id", as_index=False)[["score_rang_3", comparator_column]]
+            .mean()
+        )
+        result = _paired_summary(
+            patient_pairs["score_rang_3"],
+            patient_pairs[comparator_column],
+            label,
+            alternative="greater",
+        )
+        result["_rank"] = rank
+        result["_eye_pairs"] = eye_pairs
+        result["_patient_pairs"] = patient_pairs
+        result["_delta_column"] = delta_column
+        paired_results.append(result)
+
+    _holm_adjust_summary_rows(paired_results, "p_value_wilcoxon", "p_value_wilcoxon_holm")
+    _holm_adjust_summary_rows(paired_results, "p_value_directionnelle", "p_value_directionnelle_holm")
+    for result in paired_results:
+        rank = int(result.pop("_rank"))
+        eye_pairs = result.pop("_eye_pairs")
+        patient_pairs = result.pop("_patient_pairs")
+        delta_column = str(result.pop("_delta_column"))
+        eye_positive = int((eye_pairs[delta_column] > 0).sum())
+        patient_differences = patient_pairs["score_rang_3"] - patient_pairs[f"score_rang_{rank}"]
+        patient_positive = int((patient_differences > 0).sum())
+        adjusted_p = _finite_float(result.get("p_value_wilcoxon_holm"))
+        directional_adjusted_p = _finite_float(result.get("p_value_directionnelle_holm"))
+        delta = _finite_float(result.get("delta_moyen"))
+        summary_rows.append(
+            {
+                "Question": "Le rang 3 est-il plus tortueux dans un meme oeil ?",
+                "Comparaison": f"R3 vs R{rank}",
+                "Population": "Patients; differences calculees dans chaque oeil puis moyennees par patient pour le test",
+                "N_patients": int(len(patient_pairs)),
+                "N_yeux": int(len(eye_pairs)),
+                "Score_moyen_R3_par_patient": float(patient_pairs["score_rang_3"].mean()),
+                "Score_moyen_comparateur_par_patient": float(patient_pairs[f"score_rang_{rank}"].mean()),
+                "Delta_moyen_par_patient": delta,
+                "Delta_median_patient": _finite_float(result.get("delta_median")),
+                "Yeux_avec_R3_superieur": _count_percent(eye_positive, len(eye_pairs)),
+                "Patients_avec_R3_superieur": _count_percent(patient_positive, len(patient_pairs)),
+                "IC95_delta_moyen_bas": _finite_float(result.get("ic95_delta_moyen_bas")),
+                "IC95_delta_moyen_haut": _finite_float(result.get("ic95_delta_moyen_haut")),
+                "p_Wilcoxon_bilaterale": _finite_float(result.get("p_value_wilcoxon")),
+                "p_bilaterale_corrigee_Holm": adjusted_p,
+                "p_directionnelle_R3_superieur": _finite_float(result.get("p_value_directionnelle")),
+                "p_directionnelle_corrigee_Holm": directional_adjusted_p,
+                "Conclusion": _rank_comparison_conclusion(adjusted_p, directional_adjusted_p, delta, eye_positive, len(eye_pairs), rank),
+            }
+        )
+
+    detail = eye_table.rename(
+        columns={
+            "patient_id": "Patient",
+            "oeil": "Oeil",
+            "run": "Run",
+            "score_rang_1": "Score_R1",
+            "score_rang_2": "Score_R2",
+            "score_rang_3": "Score_R3",
+            "n_rang_1": "Nb_vaisseaux_R1",
+            "n_rang_2": "Nb_vaisseaux_R2",
+            "n_rang_3": "Nb_vaisseaux_R3",
+            "delta_R3_R1": "Delta_R3_R1",
+            "delta_R3_R2": "Delta_R3_R2",
+            "donnees_completes_R1_R2_R3": "R1_R2_R3_disponibles",
+        }
+    )
+    detail_columns = [
+        "Patient",
+        "Oeil",
+        "Run",
+        "Score_R1",
+        "Score_R2",
+        "Score_R3",
+        "Delta_R3_R1",
+        "R3_superieur_R1",
+        "Delta_R3_R2",
+        "R3_superieur_R2",
+        "Nb_vaisseaux_R1",
+        "Nb_vaisseaux_R2",
+        "Nb_vaisseaux_R3",
+        "R1_R2_R3_disponibles",
+    ]
+    for count_column in ["Nb_vaisseaux_R1", "Nb_vaisseaux_R2", "Nb_vaisseaux_R3"]:
+        detail[count_column] = pd.to_numeric(detail[count_column], errors="coerce").astype("Int64")
+    return {"Resume": pd.DataFrame(summary_rows), "Par_oeil": detail[detail_columns]}
+
+
+def _yes_no_missing(value: object) -> str:
+    numeric = _finite_float(value)
+    if not math.isfinite(numeric):
+        return "NA"
+    return "Oui" if numeric > 0 else "Non"
+
+
+def _count_percent(count: int, total: int) -> str:
+    return f"{count}/{total} ({count / total:.1%})" if total else "0/0 (NA)"
+
+
+def _rank_comparison_conclusion(
+    adjusted_p: float,
+    directional_adjusted_p: float,
+    delta: float,
+    positive_eyes: int,
+    total_eyes: int,
+    rank: int,
+) -> str:
+    proportion = positive_eyes / total_eyes if total_eyes else math.nan
+    if math.isfinite(adjusted_p) and adjusted_p < 0.05 and delta > 0:
+        return f"R3 est statistiquement plus eleve que R{rank}, mais pas dans tous les yeux ({proportion:.0%})."
+    if math.isfinite(directional_adjusted_p) and directional_adjusted_p < 0.05 and delta > 0:
+        return f"Signal directionnel en faveur de R3 > R{rank}, sans preuve bilaterale; R3 n'est pas superieur dans tous les yeux ({proportion:.0%})."
+    return f"R3 n'est pas demontre plus eleve que R{rank} et n'est pas superieur dans tous les yeux ({proportion:.0%})."
 
 
 def _same_eye_rank_sheet(rank_scores: pd.DataFrame) -> pd.DataFrame:
@@ -407,7 +726,8 @@ def _od_vs_og_sheet(rank_scores: pd.DataFrame) -> pd.DataFrame:
 def _arteries_vs_veins_sheet(data: pd.DataFrame) -> pd.DataFrame:
     if data.empty:
         return _with_summary(pd.DataFrame(), "donnees insuffisantes")
-    eligible = data["eligible"].fillna(False).astype(bool) if "eligible" in data else pd.Series(True, index=data.index)
+    eligibility_column = "eligible_analyse" if "eligible_analyse" in data else "eligible"
+    eligible = data[eligibility_column].fillna(False).astype(bool) if eligibility_column in data else pd.Series(True, index=data.index)
     patient_data = data[(data["groupe"] == "patient") & eligible].copy()
     rows: list[dict[str, object]] = []
     for (patient_id, eye, run), subset in patient_data.groupby(["patient_id", "oeil", "run"], dropna=False):
@@ -485,7 +805,8 @@ def _correlation_sheet(rank_scores: pd.DataFrame, data: pd.DataFrame, variable: 
 def _rank_eye_scores(data: pd.DataFrame) -> pd.DataFrame:
     if data.empty:
         return pd.DataFrame(columns=["patient_id", "groupe", "oeil", "run", "rang", "score_principal", "score_pondere", "score_queue_haute", "score_median", "n_vaisseaux"])
-    eligible = data["eligible"].fillna(False).astype(bool) if "eligible" in data else pd.Series(True, index=data.index)
+    eligibility_column = "eligible_analyse" if "eligible_analyse" in data else "eligible"
+    eligible = data[eligibility_column].fillna(False).astype(bool) if eligibility_column in data else pd.Series(True, index=data.index)
     subset = data[(data["type_vaisseau"] == "artere") & (data["rang"].isin([1, 2, 3])) & eligible].copy()
     rows: list[dict[str, object]] = []
     for (patient_id, group, eye, run, rank), group_df in subset.groupby(["patient_id", "groupe", "oeil", "run", "rang"], dropna=False):
@@ -884,6 +1205,7 @@ def _structured_columns() -> list[str]:
         "rang",
         "type_vaisseau",
         "territoire",
+        "score_brut",
         "score",
         "longueur",
         "longueur_brute_px",
@@ -891,6 +1213,10 @@ def _structured_columns() -> list[str]:
         "diametre_fond_oeil_px",
         "diametre_reference_px",
         "eligible",
+        "eligible_filtre_longueur",
+        "nom_clinique_valide",
+        "eligible_analyse",
+        "raison_exclusion_analyse",
         "methode_id",
         "methode",
         "poids_global",

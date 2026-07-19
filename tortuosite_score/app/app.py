@@ -15,6 +15,7 @@ from tortuosite_score.app.review_state import (
     build_vessel_payload,
     build_vessel_scores_table,
     get_or_create_review_state,
+    is_auto_completed_vessel,
     next_default_vessel_name,
     normalize_selection_refs,
     parse_segment_ref,
@@ -22,6 +23,7 @@ from tortuosite_score.app.review_state import (
     push_selection_history,
     redo_selection,
     remove_manual_segment,
+    remove_auto_completed_vessels,
     replace_auto_completed_vessels,
     score_vessel,
     segment_ref_sort_key,
@@ -167,7 +169,7 @@ def _render_selection_history_controls(
     undo_stack, redo_stack = _selection_history_stacks(undo_key, redo_key)
     undo_col, redo_col, count_col = st.columns([1.0, 1.0, 2.5], vertical_alignment="center")
     with undo_col:
-        if st.button("Annuler", disabled=not undo_stack, use_container_width=True):
+        if st.button("Annuler", disabled=not undo_stack, width="stretch"):
             review_state["selected_segment_refs"] = undo_selection(
                 undo_stack,
                 redo_stack,
@@ -176,7 +178,7 @@ def _render_selection_history_controls(
             st.session_state[viewer_reset_key] += 1
             st.rerun()
     with redo_col:
-        if st.button("Retablir", disabled=not redo_stack, use_container_width=True):
+        if st.button("Retablir", disabled=not redo_stack, width="stretch"):
             review_state["selected_segment_refs"] = redo_selection(
                 undo_stack,
                 redo_stack,
@@ -571,7 +573,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
         st.info("Cliquez sur les segments modele ou tracez des segments manuels pour construire une selection de vaisseau.")
     else:
         st.subheader("Selection courante")
-        st.dataframe(selection_df, use_container_width=True, hide_index=True)
+        st.dataframe(selection_df, width="stretch", hide_index=True)
         if selected_complete_vessels:
             st.caption(
                 "Vaisseau(x) sauvegarde(s) complet(s) dans la selection : "
@@ -581,7 +583,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
     if selected_segment_refs and redraw_target_ref:
         delete_col, clear_endpoint_col = st.columns(2)
         with delete_col:
-            if st.button("Supprimer le segment manuel selectionne", use_container_width=True):
+            if st.button("Supprimer le segment manuel selectionne", width="stretch"):
                 _, manual_segment_id = parse_segment_ref(redraw_target_ref)
                 previous_refs = segment_refs_for_review_state(review_state)
                 remove_manual_segment(review_state, manual_segment_id)
@@ -595,7 +597,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
                 persist_manual_review(selected_run_dir, review_state, branches_df, active_scoring_config)
                 st.rerun()
         with clear_endpoint_col:
-            if st.button("Effacer les points choisis", use_container_width=True):
+            if st.button("Effacer les points choisis", width="stretch"):
                 st.session_state.pop(start_endpoint_key, None)
                 st.session_state.pop(end_endpoint_key, None)
                 st.session_state[next_endpoint_target_key] = "start"
@@ -655,7 +657,7 @@ def _render_manual_review(selected_run_name: str, viewer_options: dict[str, obje
     vessel_df = build_vessel_scores_table(review_state, branches_df, active_scoring_config)
     if not vessel_df.empty:
         st.subheader("Scores des vaisseaux sauvegardes")
-        st.dataframe(vessel_df, use_container_width=True, hide_index=True)
+        st.dataframe(vessel_df, width="stretch", hide_index=True)
         st.download_button(
             "Telecharger les scores des vaisseaux",
             data=vessel_df.to_csv(index=False).encode("utf-8"),
@@ -677,7 +679,7 @@ def _render_auto_complete_controls(
 ) -> None:
     st.subheader("Auto-completion VascX")
     st.caption("Cree des vaisseaux sauvegardes complets a partir du squelette deja extrait, sans relancer VascX.")
-    if st.button("Auto-complete skeleton into saved vessels", use_container_width=True):
+    if st.button("Auto-complete skeleton into saved vessels", width="stretch"):
         generation_branches = load_saved_run_branches(selected_run_dir)
         created_count = replace_auto_completed_vessels(review_state, generation_branches)
         review_state["selected_segment_refs"] = []
@@ -685,6 +687,22 @@ def _render_auto_complete_controls(
         st.session_state[viewer_reset_key] += 1
         persist_manual_review(selected_run_dir, review_state, branches_df, active_scoring_config)
         st.success(f"{created_count} vaisseau(x) auto-complete(s) sauvegarde(s).")
+        st.rerun()
+    auto_completed_count = sum(
+        1
+        for vessel_name, vessel in review_state.get("vessels", {}).items()
+        if is_auto_completed_vessel(vessel_name, vessel)
+    )
+    if st.button(
+        f"Supprimer {auto_completed_count} vaisseau(x) auto-complete(s)",
+        disabled=auto_completed_count == 0,
+        width="stretch",
+    ):
+        removed_count = remove_auto_completed_vessels(review_state)
+        _clear_selection_history(undo_key, redo_key)
+        st.session_state[viewer_reset_key] += 1
+        persist_manual_review(selected_run_dir, review_state, branches_df, active_scoring_config)
+        st.success(f"{removed_count} vaisseau(x) auto-complete(s) supprime(s).")
         st.rerun()
 
 
@@ -768,14 +786,14 @@ def _render_vessel_draft(
     if is_editing_vessel:
         apply_col, save_new_col, cancel_col = st.columns(3)
         with apply_col:
-            if st.button("Appliquer les changements", type="primary", use_container_width=True) and can_save("appliquer les changements"):
+            if st.button("Appliquer les changements", type="primary", width="stretch") and can_save("appliquer les changements"):
                 clean_name = _resolve_clean_vessel_name(vessel_name, vessel_category, review_state["vessels"])
                 if clean_name != editing_vessel_name and clean_name in review_state["vessels"]:
                     st.warning(f"`{clean_name}` existe deja. Choisissez un autre nom avant de valider.")
                 else:
                     save_payload(clean_name, replace_name=editing_vessel_name)
         with save_new_col:
-            if st.button("Enregistrer comme nouveau", use_container_width=True) and can_save("enregistrer un vaisseau"):
+            if st.button("Enregistrer comme nouveau", width="stretch") and can_save("enregistrer un vaisseau"):
                 clean_name = _resolve_clean_vessel_name(
                     vessel_name if vessel_name.strip() != editing_vessel_name else "",
                     vessel_category,
@@ -786,7 +804,7 @@ def _render_vessel_draft(
                 else:
                     save_payload(clean_name)
         with cancel_col:
-            if st.button("Annuler l'edition", use_container_width=True):
+            if st.button("Annuler l'edition", width="stretch"):
                 _clear_vessel_draft(
                     review_state,
                     undo_key,
@@ -803,18 +821,18 @@ def _render_vessel_draft(
     else:
         save_col, clear_col, reset_col = st.columns(3)
         with save_col:
-            if st.button("Enregistrer le vaisseau actuel", type="primary", use_container_width=True) and can_save("enregistrer un vaisseau"):
+            if st.button("Enregistrer le vaisseau actuel", type="primary", width="stretch") and can_save("enregistrer un vaisseau"):
                 clean_name = _resolve_clean_vessel_name(vessel_name, vessel_category, review_state["vessels"])
                 if clean_name in review_state["vessels"]:
                     st.warning(f"`{clean_name}` existe deja. Choisissez un autre nom.")
                 else:
                     save_payload(clean_name)
         with clear_col:
-            if st.button("Effacer le nom saisi", use_container_width=True):
+            if st.button("Effacer le nom saisi", width="stretch"):
                 st.session_state[vessel_name_reset_key] = True
                 st.rerun()
         with reset_col:
-            if st.button("Effacer la selection du brouillon", use_container_width=True):
+            if st.button("Effacer la selection du brouillon", width="stretch"):
                 review_state["selected_segment_refs"] = []
                 _clear_selection_history(undo_key, redo_key)
                 st.session_state[viewer_reset_key] += 1
@@ -862,7 +880,7 @@ def _render_merge_controls(
     if not st.button(
         f"Fusionner {len(selected_complete_vessels)} vaisseaux selectionnes" if merge_ready else "Fusionner les vaisseaux selectionnes",
         disabled=not merge_ready,
-        use_container_width=True,
+        width="stretch",
         help="Selectionnez au moins deux vaisseaux sauvegardes complets.",
     ):
         return
@@ -940,18 +958,18 @@ def _render_saved_vessels(
     vessel_to_load = st.selectbox("Liste des vaisseaux sauvegardes", options=vessel_names, key=vessel_load_key)
     load_col, add_col, delete_col = st.columns(3)
     with load_col:
-        if st.button("Ouvrir pour edition", use_container_width=True):
+        if st.button("Ouvrir pour edition", width="stretch"):
             st.session_state[pending_edit_key] = vessel_to_load
             st.session_state[viewer_reset_key] += 1
             st.rerun()
     with add_col:
-        if st.button("Ajouter a la selection", use_container_width=True):
+        if st.button("Ajouter a la selection", width="stretch"):
             current = set(review_state["selected_segment_refs"])
             current.update(segment_refs_for_vessel(review_state["vessels"][vessel_to_load]))
             _set_selected_segment_refs(review_state, list(current), undo_key, redo_key, viewer_reset_key)
             st.rerun()
     with delete_col:
-        if st.button("Supprimer le vaisseau sauvegarde", use_container_width=True):
+        if st.button("Supprimer le vaisseau sauvegarde", width="stretch"):
             del review_state["vessels"][vessel_to_load]
             if st.session_state.get(editing_vessel_name_key) == vessel_to_load:
                 st.session_state.pop(editing_vessel_name_key, None)

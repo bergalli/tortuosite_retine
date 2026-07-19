@@ -220,19 +220,35 @@ def score_saved_vessel(
         end_endpoint=vessel.get("end_endpoint"),
     )
     scale = float(coordinate_scale) if math.isfinite(float(coordinate_scale)) and float(coordinate_scale) > 0 else 1.0
-    normalized_path_points = np.asarray(path_points, dtype=float) * scale
+    raw_path_points = np.asarray(path_points, dtype=float)
+    normalized_path_points = raw_path_points * scale
+    raw_local_metrics = local_bump_metrics(raw_path_points, settings)
+    raw_curvature_metrics = curvature_squared_metrics(raw_path_points, settings)
     local_metrics = local_bump_metrics(normalized_path_points, settings)
     curvature_metrics = curvature_squared_metrics(normalized_path_points, settings)
     raw_path_length = float(diagnostic.get("length", math.nan))
-    path_length = float(local_metrics["branch_length"])
-    chord_length = float(local_metrics["chord_length"])
-    arc_chord_value = float(local_metrics["arc_chord_tortuosity"])
+    raw_chord_length = float(diagnostic.get("chord", math.nan))
+    path_length = raw_path_length * scale if math.isfinite(raw_path_length) else math.nan
+    chord_length = raw_chord_length * scale if math.isfinite(raw_chord_length) else math.nan
+    arc_chord_value = float(diagnostic.get("tortuosity", local_metrics["arc_chord_tortuosity"]))
     if config.method_id == "local_bump":
         primary_score = float(local_metrics["branch_bump_score"])
+        raw_primary_score = float(raw_local_metrics["branch_bump_score"])
     elif config.method_id == "curvature_squared":
         primary_score = float(curvature_metrics["curvature_squared_score"])
+        raw_primary_score = float(raw_curvature_metrics["curvature_squared_score"])
     else:
         primary_score = arc_chord_value
+        raw_primary_score = arc_chord_value
+    score_geometry_valid = bool(
+        math.isfinite(raw_path_length)
+        and raw_path_length > 0
+        and (
+            math.isfinite(arc_chord_value)
+            if config.method_id == "arc_chord"
+            else float(local_metrics["branch_length"]) > 0
+        )
+    )
     return {
         "vessel_id": int(vessel_id) if vessel_id is not None else math.nan,
         "vessel_name": vessel_name,
@@ -242,8 +258,11 @@ def score_saved_vessel(
         "scoring_method_label": method.label,
         "primary_score_label": method.primary_score_label,
         "primary_score": primary_score,
+        "raw_primary_score": raw_primary_score,
         "display_name": method.primary_score_label,
-        "eligible": _is_saved_vessel_eligible(path_length, config),
+        "eligible": score_geometry_valid and _is_saved_vessel_eligible(path_length, config),
+        "meets_length_threshold": _is_saved_vessel_eligible(path_length, config),
+        "score_geometry_valid": score_geometry_valid,
         "vessel_length": path_length,
         "raw_vessel_length": raw_path_length,
         "coordinate_scale": scale,

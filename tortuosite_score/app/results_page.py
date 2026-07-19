@@ -21,7 +21,10 @@ from tortuosite_score.app.review_state import (
     segment_refs_for_vessel,
 )
 from tortuosite_score.vessels_detection.local_bump_score import weighted_mean
-from tortuosite_score.vessels_detection.clinical_excel import generate_clinical_excel
+from tortuosite_score.vessels_detection.clinical_excel import (
+    analysis_vessel_eligibility,
+    generate_clinical_excel_outputs,
+)
 from tortuosite_score.vessels_detection.scoring import (
     ScoringConfig,
     scoring_config as build_scoring_config,
@@ -39,7 +42,8 @@ STATS_EXPLANATION = (
 )
 RAW_PVALUE_EXPLANATION = (
     "Chaque cellule compare l'image en ligne a l'image en colonne avec un test de Mann-Whitney unilateral "
-    "(alternative: la distribution des scores des vaisseaux retenus de la ligne est plus elevee que celle de la "
+    "sur les seuls vaisseaux valides de l'onglet Clean_vessels de l'export brut "
+    "(alternative: la distribution des scores des vaisseaux valides de la ligne est plus elevee que celle de la "
     "colonne). Ces p-values brutes repondent donc a une question simple: l'oeil de la ligne a-t-il des scores "
     "globalement plus eleves que l'oeil de la colonne ?"
 )
@@ -438,10 +442,17 @@ def render_results_page(scoring_config: ScoringConfig | None = None) -> None:
         file_name=f"rapport_tortuosite_{method.method_id}.pdf",
         mime="application/pdf",
     )
+    clinical_excel, classified_vessels_excel = generate_clinical_excel_outputs(runs, scoring_config)
     st.download_button(
-        "Generer l'Excel des analyses cliniques",
-        data=generate_clinical_excel(runs, scoring_config),
-        file_name=f"analyses_tortuosite_cliniques_{method.method_id}.xlsx",
+        "Generer l'Excel comparaison des rangs 1, 2 et 3",
+        data=clinical_excel,
+        file_name=f"comparaison_rangs_1_2_3_{method.method_id}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.download_button(
+        "Generate classified vessel raw data Excel",
+        data=classified_vessels_excel,
+        file_name=f"classified_vessels_raw_{method.method_id}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
@@ -497,11 +508,35 @@ def _build_local_bump_pvalue_matrices(
     scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     scores_by_image = {
-        run_dir.name: _eligible_primary_scores(system_scores)
+        run_dir.name: _analysis_eligible_primary_scores(system_scores)
         for run_dir, _summary, system_scores in scored_runs
     }
     raw_matrix = build_pvalue_matrix(scores_by_image)
     return raw_matrix, build_adjusted_pvalue_matrix(raw_matrix)
+
+
+def _analysis_eligible_primary_scores(system_scores: pd.DataFrame) -> list[float]:
+    """Scores from the same vessels exported in the raw Excel Clean_vessels sheet."""
+
+    required_columns = {"vessel_name", "vessel_length", "primary_score"}
+    if system_scores.empty or not required_columns.issubset(system_scores.columns):
+        return []
+    scores: list[float] = []
+    for _, row in system_scores.iterrows():
+        is_eligible, _reason = analysis_vessel_eligibility(
+            str(row.get("vessel_name", "")),
+            row.get("category"),
+            row.get("vessel_length"),
+        )
+        if not is_eligible:
+            continue
+        try:
+            numeric = float(row["primary_score"])
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            scores.append(numeric)
+    return scores
 
 
 def _eligible_primary_scores(system_scores: pd.DataFrame) -> list[float]:

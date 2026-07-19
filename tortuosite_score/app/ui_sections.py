@@ -181,7 +181,7 @@ def render_sidebar_run_setup() -> dict:
             "Lancer la segmentation",
             type="primary",
             disabled=uploaded_file is None,
-            use_container_width=True,
+            width="stretch",
         )
 
     return {
@@ -213,12 +213,12 @@ def render_debug_tab(run_dir: Path) -> None:
     manual_csv = run_dir / "manual_vessels.csv"
     if manual_csv.exists():
         st.subheader("Vaisseaux manuels sauvegardes")
-        st.dataframe(pd.read_csv(manual_csv), use_container_width=True)
+        st.dataframe(pd.read_csv(manual_csv), width="stretch")
 
     results_csv = run_dir / "results.csv"
     if results_csv.exists():
         st.subheader("Sortie historique de selection automatique")
-        st.dataframe(pd.read_csv(results_csv), use_container_width=True)
+        st.dataframe(pd.read_csv(results_csv), width="stretch")
 
     logs_path = run_dir / "logs.txt"
     if logs_path.exists():
@@ -232,4 +232,4 @@ def render_debug_tab(run_dir: Path) -> None:
     if image_files:
         st.subheader("Sorties intermediaires")
         for image_file in image_files:
-            st.image(str(image_file), caption=image_file.name, use_container_width=True)
+            st.image(str(image_file), caption=image_file.name, width="stretch")

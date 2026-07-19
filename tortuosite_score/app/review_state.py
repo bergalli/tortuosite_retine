@@ -294,8 +294,25 @@ def build_auto_vascx_vessels(
                 "synthetic_links": [],
                 "start_endpoint": create_geometry_endpoint(points[0], segment_ref, 0.0),
                 "end_endpoint": create_geometry_endpoint(points[-1], segment_ref, float(row["branch-distance"])),
+                "source": "auto_vascx",
             }
     return vessels
+
+
+def is_auto_completed_vessel(vessel_name: str, vessel: dict, prefix: str = "auto_vascx") -> bool:
+    return vessel.get("source") == "auto_vascx" or vessel_name.startswith(f"{prefix}_")
+
+
+def remove_auto_completed_vessels(review_state: dict, prefix: str = "auto_vascx") -> int:
+    vessels = review_state.setdefault("vessels", {})
+    auto_names = [
+        vessel_name
+        for vessel_name, vessel in vessels.items()
+        if is_auto_completed_vessel(vessel_name, vessel, prefix=prefix)
+    ]
+    for vessel_name in auto_names:
+        vessels.pop(vessel_name, None)
+    return len(auto_names)
 
 
 def replace_auto_completed_vessels(
@@ -309,7 +326,7 @@ def replace_auto_completed_vessels(
     review_state["vessels"] = {
         vessel_name: vessel
         for vessel_name, vessel in review_state["vessels"].items()
-        if not vessel_name.startswith(f"{prefix}_")
+        if not is_auto_completed_vessel(vessel_name, vessel, prefix=prefix)
     }
     generated = build_auto_completed_vessels(branches_df, settings=settings, prefix=prefix)
     review_state["vessels"].update(generated)
@@ -373,6 +390,8 @@ def _normalize_vessels(vessels: dict[str, dict]) -> dict[str, dict]:
             "start_endpoint": normalize_endpoint(vessel.get("start_endpoint")),
             "end_endpoint": normalize_endpoint(vessel.get("end_endpoint")),
         }
+        if vessel.get("source"):
+            normalized[vessel_name]["source"] = str(vessel["source"])
     return normalized
 
 

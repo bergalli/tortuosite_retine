@@ -20,7 +20,7 @@ def main() -> None:
         nbf.v4.new_markdown_cell(
             """## tl;dr
 
-Après normalisation de la géométrie sur un diamètre de fond d'œil commun, les patients ont des scores supérieurs aux témoins pour les trois rangs (Wilcoxon apparié, p bilatérales corrigées de Holm ≤ 0,014). En revanche, les données ne montrent pas que le rang 3 est systématiquement plus tortueux que les rangs 1 et 2. L'association bilatérale est surtout visible au rang 3. La comparaison artères–veines de rang 3 est suggestive mais sous-puissante, car seules neuf paires œil/artères/veines sont disponibles. Les analyses âge et sévérité ne sont pas calculables sans `demo/clinical_metadata.csv`.
+Après normalisation de la géométrie sur un diamètre de fond d'œil commun et conservation des noms cliniques valides malgré le seuil de longueur, les patients ont des scores supérieurs aux témoins pour les trois rangs (Wilcoxon apparié, p bilatérales corrigées de Holm ≤ 0,033). En revanche, les données ne montrent pas que le rang 3 est systématiquement plus tortueux que les rangs 1 et 2. L'association bilatérale est surtout visible au rang 3. La comparaison artères–veines de rang 3 est suggestive mais sous-puissante, car seules neuf paires œil/artères/veines sont disponibles. Les analyses âge et sévérité ne sont pas calculables sans `demo/clinical_metadata.csv`.
 """
         ),
         nbf.v4.new_markdown_cell(
@@ -61,7 +61,8 @@ rank_scores = _rank_eye_scores(structured)
 print({
     "runs_exploitables": int(structured["run"].nunique()),
     "vaisseaux_sauvegardes": int(len(structured)),
-    "vaisseaux_eligibles": int(structured["eligible"].sum()),
+    "vaisseaux_eligibles_filtre_longueur": int(structured["eligible_filtre_longueur"].sum()),
+    "vaisseaux_eligibles_analyse": int(structured["eligible_analyse"].sum()),
     "patients": int(structured.loc[structured["groupe"] == "patient", "patient_id"].nunique()),
 })"""
         ),
@@ -110,7 +111,7 @@ display(arteries_veins.loc[arteries_veins["section"] == "resume"].dropna(axis=1,
         nbf.v4.new_markdown_cell("### 7. Vérifier le biais résiduel lié au format d'acquisition"),
         nbf.v4.new_code_cell(
             """eligible_arteries = structured[
-    (structured["eligible"])
+    (structured["eligible_analyse"])
     & (structured["type_vaisseau"] == "artere")
     & (structured["rang"].isin([1, 2, 3]))
 ].copy()

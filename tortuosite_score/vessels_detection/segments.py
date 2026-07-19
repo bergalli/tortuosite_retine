@@ -11,6 +11,8 @@ import pandas as pd
 SegmentSource = Literal["model", "manual"]
 
 GEOMETRY_JOIN_TOLERANCE = 10.0
+SYNTHETIC_LINK_MAX_LENGTH = 80.0
+SYNTHETIC_LINK_DIRECTION_COSINE = 0.15
 MIN_MANUAL_SEGMENT_POINTS = 2
 MIN_MANUAL_SEGMENT_LENGTH = 8.0
 
@@ -419,6 +421,8 @@ def synthesize_segment_links(
     segments: dict[str, VesselSegment],
     selected_refs: list[str],
     join_tolerance: float = GEOMETRY_JOIN_TOLERANCE,
+    max_link_length: float = SYNTHETIC_LINK_MAX_LENGTH,
+    direction_cosine: float = SYNTHETIC_LINK_DIRECTION_COSINE,
 ) -> dict[str, object]:
     selected = {
         segment_ref: segments[segment_ref]
@@ -441,29 +445,37 @@ def synthesize_segment_links(
         best_pair: tuple[int, int] | None = None
         best_link: dict[str, object] | None = None
         best_length = float("inf")
-        component_refs = [segment_refs_for_component(component, segment_nodes) for component in working]
+        component_endpoints = [
+            endpoint_candidates_for_component(component, segment_nodes, selected, graph_nodes, adjacency)
+            for component in working
+        ]
 
-        for idx, component_a in enumerate(working):
-            nodes_a = component_candidate_nodes(component_a, adjacency)
+        for idx in range(len(working)):
+            endpoints_a = component_endpoints[idx]
             for jdx in range(idx + 1, len(working)):
-                refs_b = component_refs[jdx]
-                for node_a in nodes_a:
-                    point_a = graph_nodes[node_a]["point"]
-                    target_b = nearest_point_on_component(refs_b, selected, point_a)
-                    if target_b is None:
-                        continue
-                    point_b = target_b["point"]
-                    link_length = distance(point_a, point_b)
-                    if link_length < best_length:
-                        best_length = link_length
-                        best_pair = (idx, jdx)
-                        best_link = {
-                            "points": [[float(point_a[0]), float(point_a[1])], [float(point_b[0]), float(point_b[1])]],
-                            "length": float(link_length),
-                            "display_length": float(link_length),
-                            "target_segment_ref": target_b["segment_ref"],
-                            "target_distance_from_start": target_b["distance_from_start"],
-                        }
+                for endpoint_a in endpoints_a:
+                    point_a = endpoint_a["point"]
+                    for endpoint_b in component_endpoints[jdx]:
+                        point_b = endpoint_b["point"]
+                        link_length = distance(point_a, point_b)
+                        if link_length > max_link_length:
+                            continue
+                        if not synthetic_link_direction_compatible(
+                            endpoint_a,
+                            endpoint_b,
+                            direction_cosine,
+                        ):
+                            continue
+                        if link_length < best_length:
+                            best_length = link_length
+                            best_pair = (idx, jdx)
+                            best_link = {
+                                "points": [[float(point_a[0]), float(point_a[1])], [float(point_b[0]), float(point_b[1])]],
+                                "length": float(link_length),
+                                "display_length": float(link_length),
+                                "target_segment_ref": endpoint_b["segment_ref"],
+                                "target_distance_from_start": endpoint_b["distance_from_start"],
+                            }
 
         if best_pair is None or best_link is None:
             return {
@@ -487,6 +499,87 @@ def synthesize_segment_links(
         "resolved_component_count": 1,
         "bridge_success": True,
     }
+
+
+def endpoint_candidates_for_component(
+    component: set[int],
+    segment_nodes: dict[str, list[int]],
+    segments: dict[str, VesselSegment],
+    graph_nodes: list[dict[str, object]],
+    adjacency: dict[int, list[tuple[int, float]]],
+) -> list[dict[str, object]]:
+    component_node_ids = set(component)
+    candidates: list[dict[str, object]] = []
+    seen: set[tuple[str, int]] = set()
+    for segment_ref, node_ids in segment_nodes.items():
+        segment = segments.get(segment_ref)
+        if segment is None or len(node_ids) < 2:
+            continue
+        endpoint_specs = (
+            (0, 0.0),
+            (len(node_ids) - 1, float(segment.path_length)),
+        )
+        for point_index, distance_from_start in endpoint_specs:
+            node_id = node_ids[point_index]
+            if node_id not in component_node_ids or len(adjacency.get(node_id, [])) > 1:
+                continue
+            key = (segment_ref, point_index)
+            if key in seen:
+                continue
+            tangent = segment_endpoint_tangent(segment, point_index)
+            if tangent is None:
+                continue
+            seen.add(key)
+            point = graph_nodes[node_id]["point"]
+            candidates.append(
+                {
+                    "node_id": node_id,
+                    "point": [float(point[0]), float(point[1])],
+                    "segment_ref": segment_ref,
+                    "distance_from_start": distance_from_start,
+                    "tangent": tangent,
+                }
+            )
+    return candidates
+
+
+def segment_endpoint_tangent(segment: VesselSegment, point_index: int) -> np.ndarray | None:
+    points = np.asarray(segment.points, dtype=float)
+    if len(points) < 2:
+        return None
+    if point_index == 0:
+        vector = points[0] - points[min(4, len(points) - 1)]
+    else:
+        vector = points[-1] - points[max(0, len(points) - 5)]
+    return normalized_vector(vector)
+
+
+def synthetic_link_direction_compatible(
+    endpoint_a: dict[str, object],
+    endpoint_b: dict[str, object],
+    direction_cosine: float,
+) -> bool:
+    tangent_a = endpoint_a.get("tangent")
+    tangent_b = endpoint_b.get("tangent")
+    if tangent_a is None or tangent_b is None:
+        return False
+    point_a = np.asarray(endpoint_a["point"], dtype=float)
+    point_b = np.asarray(endpoint_b["point"], dtype=float)
+    direction_ab = normalized_vector(point_b - point_a)
+    if direction_ab is None:
+        return False
+    direction_ba = -direction_ab
+    return (
+        float(np.dot(np.asarray(tangent_a, dtype=float), direction_ab)) >= direction_cosine
+        and float(np.dot(np.asarray(tangent_b, dtype=float), direction_ba)) >= direction_cosine
+    )
+
+
+def normalized_vector(vector: np.ndarray) -> np.ndarray | None:
+    norm = float(np.linalg.norm(vector))
+    if norm <= 1e-9:
+        return None
+    return vector / norm
 
 
 def build_segment_graph(

@@ -339,6 +339,12 @@ class CentralScoringServiceTests(unittest.TestCase):
         self.assertAlmostEqual(float(base_score["primary_score"]), float(normalized_score["primary_score"]), places=10)
         self.assertAlmostEqual(float(base_score["vessel_length"]), float(normalized_score["vessel_length"]), places=10)
         self.assertGreater(float(normalized_score["raw_vessel_length"]), float(normalized_score["vessel_length"]))
+        self.assertIn("raw_primary_score", normalized_score)
+        self.assertNotAlmostEqual(
+            float(normalized_score["raw_primary_score"]),
+            float(normalized_score["primary_score"]),
+            places=6,
+        )
 
     def test_short_vessel_filter_applies_to_all_scoring_methods_by_default(self) -> None:
         points = [[0, 0], [20, 6], [40, -6], [60, 6], [80, 0]]

@@ -17,7 +17,9 @@ from tortuosite_score.vessels_detection.segments import (
     synthesize_segment_links,
 )
 from tortuosite_score.app.review_state import (
+    _normalize_vessels,
     replace_auto_completed_vessels,
+    remove_auto_completed_vessels,
     push_selection_history,
     redo_selection,
     undo_selection,
@@ -125,6 +127,26 @@ class VesselSegmentTests(unittest.TestCase):
         self.assertTrue(math.isclose(score["length"], 30.0))
         self.assertTrue(math.isclose(score["chord"], 30.0))
 
+    def test_synthetic_links_do_not_snap_to_middle_of_segment(self) -> None:
+        hanging = VesselSegment.from_manual_points(1, [[150, 30], [150, 20]])
+        trunk = VesselSegment.from_manual_points(2, [[100, 0], [200, 0]])
+        segments = {hanging.ref: hanging, trunk.ref: trunk}
+
+        resolution = synthesize_segment_links(segments, [hanging.ref, trunk.ref])
+
+        self.assertFalse(resolution["bridge_success"])
+        self.assertEqual(resolution["synthetic_links"], [])
+
+    def test_synthetic_links_reject_long_shortcuts(self) -> None:
+        first = VesselSegment.from_manual_points(1, [[0, 0], [20, 0]])
+        second = VesselSegment.from_manual_points(2, [[220, 0], [240, 0]])
+        segments = {first.ref: first, second.ref: second}
+
+        resolution = synthesize_segment_links(segments, [first.ref, second.ref])
+
+        self.assertFalse(resolution["bridge_success"])
+        self.assertEqual(resolution["synthetic_links"], [])
+
     def test_ordered_points_follow_saved_vessel_endpoints(self) -> None:
         segment = VesselSegment.from_manual_points(1, [[0, 0], [10, 0], [20, 0]])
         start = create_geometry_endpoint([20, 0], manual_segment_ref(1), 20.0)
@@ -221,6 +243,48 @@ class AutoCompleteVesselTests(unittest.TestCase):
         self.assertIn("manual_keep", review_state["vessels"])
         self.assertNotIn("auto_vascx_99", review_state["vessels"])
         self.assertTrue(any(name.startswith("auto_vascx_") for name in review_state["vessels"]))
+        self.assertTrue(
+            all(
+                vessel.get("source") == "auto_vascx"
+                for name, vessel in review_state["vessels"].items()
+                if name.startswith("auto_vascx_")
+            )
+        )
+
+    def test_remove_auto_completed_vessels_uses_source_with_name_fallback(self) -> None:
+        review_state = {
+            "selected_segment_refs": ["model:0"],
+            "vessels": {
+                "manual_keep": {"category": "veine", "segment_refs": ["model:0"], "synthetic_links": []},
+                "renamed_auto": {
+                    "category": "artere",
+                    "segment_refs": ["model:1"],
+                    "synthetic_links": [],
+                    "source": "auto_vascx",
+                },
+                "auto_vascx_legacy": {"category": "artere", "segment_refs": ["model:2"], "synthetic_links": []},
+            },
+        }
+
+        removed = remove_auto_completed_vessels(review_state)
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(set(review_state["vessels"]), {"manual_keep"})
+        self.assertEqual(review_state["selected_segment_refs"], ["model:0"])
+
+    def test_normalize_vessels_preserves_source(self) -> None:
+        normalized = _normalize_vessels(
+            {
+                "renamed_auto": {
+                    "category": "artere",
+                    "segment_refs": ["model:1"],
+                    "synthetic_links": [],
+                    "source": "auto_vascx",
+                }
+            }
+        )
+
+        self.assertEqual(normalized["renamed_auto"]["source"], "auto_vascx")
 
 
 if __name__ == "__main__":

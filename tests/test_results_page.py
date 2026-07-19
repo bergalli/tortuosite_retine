@@ -147,15 +147,20 @@ class ResultsPageTests(unittest.TestCase):
         self.assertTrue(pdf_bytes.startswith(b"%PDF"))
         self.assertGreater(len(pdf_bytes), 1000)
 
-    def test_local_bump_pvalue_matrices_use_eligible_primary_scores(self) -> None:
+    def test_local_bump_pvalue_matrices_use_raw_excel_clean_vessels(self) -> None:
         scored_runs = [
             (
                 _fake_run_dir("eye_a"),
                 {},
                 pd.DataFrame(
                     {
-                        "eligible": [True, False, True],
-                        "primary_score": [1.0, 9.9, 1.1],
+                        # The short but classified artery is kept. The scorer-eligible
+                        # vein is rejected, exactly as in the raw Excel workbook.
+                        "vessel_name": ["1°A-sup", "VEINE TEMPORALE INF", "unknown"],
+                        "category": ["artere", "artere", "artere"],
+                        "vessel_length": [50.0, 150.0, 150.0],
+                        "eligible": [False, True, True],
+                        "primary_score": [1.0, 9.9, 8.8],
                     }
                 ),
             ),
@@ -164,6 +169,9 @@ class ResultsPageTests(unittest.TestCase):
                 {},
                 pd.DataFrame(
                     {
+                        "vessel_name": ["2°A-inf", "3°A-sup"],
+                        "category": ["artere", "artere"],
+                        "vessel_length": [120.0, 130.0],
                         "eligible": [True, True],
                         "primary_score": [2.0, 2.1],
                     }
