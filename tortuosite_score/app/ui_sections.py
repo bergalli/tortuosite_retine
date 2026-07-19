@@ -53,13 +53,13 @@ def render_sidebar_run_setup() -> dict:
         )
         st.session_state["filter_short_vessels"] = filter_short_vessels
         min_saved_vessel_length = st.number_input(
-            "Longueur minimale vaisseau retenu",
+            "Longueur minimale vaisseau retenu (px normalises)",
             min_value=0.0,
             max_value=1000.0,
             value=float(st.session_state.get("min_saved_vessel_length", 100.0)),
             step=10.0,
             disabled=not filter_short_vessels,
-            help="Seuil applique a toutes les methodes de score quand le filtre est actif.",
+            help="Seuil applique apres normalisation du diametre du fond d'oeil a 1024 px.",
         )
         st.session_state["min_saved_vessel_length"] = min_saved_vessel_length
         resample_curvature_squared = st.toggle(

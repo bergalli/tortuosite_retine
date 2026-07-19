@@ -35,6 +35,7 @@ DEFAULT_BRIDGE_TOLERANCE = 18.0
 DEFAULT_BRIDGE_DIRECTION_COSINE = 0.35
 DEFAULT_MIN_SAVED_VESSEL_LENGTH = 100.0
 DISPLAY_SCALE = 1000.0
+REFERENCE_FUNDUS_DIAMETER = 1024.0
 
 
 @dataclass(frozen=True)
@@ -370,6 +371,10 @@ def load_saved_run_branches(run_dir: str | Path) -> pd.DataFrame:
     branches["vascx_artery_pixels"] = 0
     branches["vascx_vein_pixels"] = 0
     branches.attrs["root_hint"] = disc_center_from_output_dir(output_dir)
+    coordinate_scale, fundus_diameter = fundus_coordinate_scale(output_dir)
+    branches.attrs["coordinate_scale"] = coordinate_scale
+    branches.attrs["fundus_diameter_px"] = fundus_diameter
+    branches.attrs["reference_fundus_diameter_px"] = REFERENCE_FUNDUS_DIAMETER
 
     path_points_by_signature: dict[
         tuple[tuple[int, int], tuple[int, int]],
@@ -408,6 +413,26 @@ def load_saved_run_branches(run_dir: str | Path) -> pd.DataFrame:
             branches.loc[branch_id, "vascx_vein_pixels"] = vein_pixels
             branches.loc[branch_id, "vascx_category"] = _category_from_pixels(artery_pixels, vein_pixels)
     return branches
+
+
+def fundus_coordinate_scale(output_dir: str | Path) -> tuple[float, float]:
+    """Return a scale that expresses geometry in a common retinal image space.
+
+    The equivalent diameter of the segmented fundus is used instead of the raw
+    image width so rectangular crops and black borders do not change the unit.
+    A scale of 1 is a safe fallback for legacy runs without a fundus mask.
+    """
+
+    fundus_mask = _read_optional_mask(Path(output_dir) / "02b_fundus_mask.png")
+    if fundus_mask is None:
+        return 1.0, math.nan
+    area = int(np.count_nonzero(fundus_mask))
+    if area <= 0:
+        return 1.0, math.nan
+    equivalent_diameter = float(2.0 * math.sqrt(area / math.pi))
+    if not math.isfinite(equivalent_diameter) or equivalent_diameter <= 0:
+        return 1.0, math.nan
+    return float(REFERENCE_FUNDUS_DIAMETER / equivalent_diameter), equivalent_diameter
 
 
 def disc_center_from_output_dir(output_dir: Path) -> tuple[float, float] | None:

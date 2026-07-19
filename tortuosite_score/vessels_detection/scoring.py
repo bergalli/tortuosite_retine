@@ -12,6 +12,7 @@ import pandas as pd
 
 from tortuosite_score.vessels_detection.local_bump_score import (
     DISPLAY_SCALE,
+    REFERENCE_FUNDUS_DIAMETER,
     LocalBumpSettings,
     add_comparative_hybrid_score,
     curvature_squared_metrics,
@@ -151,7 +152,10 @@ def scoring_method_fixed_parameters(config: ScoringConfig | None = None) -> list
         if settings.filter_short_vessels
         else "desactive"
     )
-    shared_parameters = [("Filtre petits vaisseaux", filter_label)]
+    shared_parameters = [
+        ("Normalisation geometrie", f"diametre du fond d'oeil ramene a {REFERENCE_FUNDUS_DIAMETER:.0f} px"),
+        ("Filtre petits vaisseaux", filter_label.replace(" px", " px normalises")),
+    ]
     if config.method_id == "local_bump":
         return [
             *shared_parameters,
@@ -192,6 +196,7 @@ def score_saved_vessel(
     vessel: dict[str, object],
     config: ScoringConfig | None = None,
     vessel_id: int | None = None,
+    coordinate_scale: float = 1.0,
 ) -> dict[str, object]:
     config = config or ScoringConfig()
     method = scoring_method_spec(config.method_id)
@@ -214,11 +219,14 @@ def score_saved_vessel(
         start_endpoint=vessel.get("start_endpoint"),
         end_endpoint=vessel.get("end_endpoint"),
     )
-    local_metrics = local_bump_metrics(path_points, settings)
-    curvature_metrics = curvature_squared_metrics(path_points, settings)
-    path_length = float(diagnostic.get("length", local_metrics["branch_length"]))
-    chord_length = float(diagnostic.get("chord", local_metrics["chord_length"]))
-    arc_chord_value = float(diagnostic.get("tortuosity", local_metrics["arc_chord_tortuosity"]))
+    scale = float(coordinate_scale) if math.isfinite(float(coordinate_scale)) and float(coordinate_scale) > 0 else 1.0
+    normalized_path_points = np.asarray(path_points, dtype=float) * scale
+    local_metrics = local_bump_metrics(normalized_path_points, settings)
+    curvature_metrics = curvature_squared_metrics(normalized_path_points, settings)
+    raw_path_length = float(diagnostic.get("length", math.nan))
+    path_length = float(local_metrics["branch_length"])
+    chord_length = float(local_metrics["chord_length"])
+    arc_chord_value = float(local_metrics["arc_chord_tortuosity"])
     if config.method_id == "local_bump":
         primary_score = float(local_metrics["branch_bump_score"])
     elif config.method_id == "curvature_squared":
@@ -237,6 +245,8 @@ def score_saved_vessel(
         "display_name": method.primary_score_label,
         "eligible": _is_saved_vessel_eligible(path_length, config),
         "vessel_length": path_length,
+        "raw_vessel_length": raw_path_length,
+        "coordinate_scale": scale,
         "path_length": path_length,
         "chord_length": chord_length,
         "arc_chord_diagnostic": arc_chord_value,
@@ -266,11 +276,24 @@ def score_saved_vessels_for_state(
 ) -> pd.DataFrame:
     config = config or ScoringConfig()
     segment_map = build_segment_map(branches, review_state.get("manual_segments", {}) if isinstance(review_state.get("manual_segments"), dict) else {})
+    coordinate_scale = float(branches.attrs.get("coordinate_scale", 1.0))
+    fundus_diameter = branches.attrs.get("fundus_diameter_px", math.nan)
+    reference_diameter = branches.attrs.get("reference_fundus_diameter_px", math.nan)
     rows: list[dict[str, object]] = []
     for index, (vessel_name, vessel) in enumerate(sorted(review_state.get("vessels", {}).items()), start=1):
         if not isinstance(vessel, dict):
             continue
-        rows.append(score_saved_vessel(segment_map, vessel_name, vessel, config=config, vessel_id=index))
+        row = score_saved_vessel(
+            segment_map,
+            vessel_name,
+            vessel,
+            config=config,
+            vessel_id=index,
+            coordinate_scale=coordinate_scale,
+        )
+        row["fundus_diameter_px"] = fundus_diameter
+        row["reference_fundus_diameter_px"] = reference_diameter
+        rows.append(row)
     return pd.DataFrame(rows)
 
 

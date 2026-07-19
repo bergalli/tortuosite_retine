@@ -1,5 +1,7 @@
 README.md
 pyproject.toml
+tests/test_clinical_excel.py
+tests/test_local_bump_score.py
 tests/test_results_page.py
 tests/test_segments.py
 tortuosite_retine.egg-info/PKG-INFO
@@ -32,11 +34,14 @@ tortuosite_score/external_models/dcp/models/crit/get_bd.py
 tortuosite_score/external_models/dcp/models/crit/mmd.py
 tortuosite_score/vessels_detection/__init__.py
 tortuosite_score/vessels_detection/analyse.py
+tortuosite_score/vessels_detection/clinical_excel.py
 tortuosite_score/vessels_detection/data_load.py
 tortuosite_score/vessels_detection/deep_model.py
 tortuosite_score/vessels_detection/dl_extra.py
 tortuosite_score/vessels_detection/image_utils.py
+tortuosite_score/vessels_detection/local_bump_score.py
 tortuosite_score/vessels_detection/main.py
+tortuosite_score/vessels_detection/scoring.py
 tortuosite_score/vessels_detection/segments.py
 tortuosite_score/vessels_detection/skan_extra.py
 tortuosite_score/vessels_detection/skeleton_graph.py

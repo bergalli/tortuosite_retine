@@ -21,6 +21,7 @@ from tortuosite_score.app.review_state import (
     segment_refs_for_vessel,
 )
 from tortuosite_score.vessels_detection.local_bump_score import weighted_mean
+from tortuosite_score.vessels_detection.clinical_excel import generate_clinical_excel
 from tortuosite_score.vessels_detection.scoring import (
     ScoringConfig,
     scoring_config as build_scoring_config,
@@ -437,6 +438,12 @@ def render_results_page(scoring_config: ScoringConfig | None = None) -> None:
         file_name=f"rapport_tortuosite_{method.method_id}.pdf",
         mime="application/pdf",
     )
+    st.download_button(
+        "Generer l'Excel des analyses cliniques",
+        data=generate_clinical_excel(runs, scoring_config),
+        file_name=f"analyses_tortuosite_cliniques_{method.method_id}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 def _endpoint_caption(endpoint: dict[str, object] | None) -> str:
@@ -695,8 +702,8 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
     ax.text(0.08, 0.88, explanation, va="top", fontsize=10, wrap=True)
     steps = list(method.report_steps)
     if method.method_id in {"local_bump", "curvature_squared"}:
-        steps[2] = f"3. Exclure les vaisseaux trop courts: longueur minimale {settings.min_saved_vessel_length:.0f} px."
-        steps[3] = f"4. Re-echantillonner chaque vaisseau tous les {settings.resample_step:.1f} px."
+        steps[2] = f"3. Normaliser le diametre du fond d'oeil a 1024 px, puis exclure les vaisseaux sous {settings.min_saved_vessel_length:.0f} px normalises."
+        steps[3] = f"4. Re-echantillonner chaque vaisseau tous les {settings.resample_step:.1f} px normalises."
         steps[4] = f"5. Lisser legerement la ligne centrale: fenetre {settings.smoothing_window} points."
     if method.method_id == "local_bump":
         steps[6] = f"7. Ignorer les changements minuscules: seuil {settings.curvature_threshold:.3f} rad."

@@ -312,6 +312,34 @@ class CentralScoringServiceTests(unittest.TestCase):
             float(curvature_score["primary_score"]),
         )
 
+    def test_coordinate_normalization_makes_scaled_geometry_comparable(self) -> None:
+        def score_for(points: list[list[float]], scale: float) -> dict[str, object]:
+            segment = VesselSegment.from_manual_points(1, points)
+            segment_map = build_segment_map(pd.DataFrame(), {"1": segment.to_manual_payload()})
+            vessel = {
+                "category": "artere",
+                "segment_refs": [segment.ref],
+                "synthetic_links": [],
+                "start_endpoint": {"kind": "geometry_point", "point": points[0], "segment_ref": segment.ref},
+                "end_endpoint": {"kind": "geometry_point", "point": points[-1], "segment_ref": segment.ref},
+            }
+            return score_saved_vessel(
+                segment_map,
+                "v1",
+                vessel,
+                config=scoring_config("local_bump"),
+                coordinate_scale=scale,
+            )
+
+        base = [[0, 0], [40, 12], [80, -12], [120, 12], [160, 0]]
+        enlarged = [[4 * x, 4 * y] for x, y in base]
+        base_score = score_for(base, 1.0)
+        normalized_score = score_for(enlarged, 0.25)
+
+        self.assertAlmostEqual(float(base_score["primary_score"]), float(normalized_score["primary_score"]), places=10)
+        self.assertAlmostEqual(float(base_score["vessel_length"]), float(normalized_score["vessel_length"]), places=10)
+        self.assertGreater(float(normalized_score["raw_vessel_length"]), float(normalized_score["vessel_length"]))
+
     def test_short_vessel_filter_applies_to_all_scoring_methods_by_default(self) -> None:
         points = [[0, 0], [20, 6], [40, -6], [60, 6], [80, 0]]
         segment = VesselSegment.from_manual_points(1, points)
@@ -421,11 +449,18 @@ class CentralScoringServiceTests(unittest.TestCase):
         self.assertEqual(
             curvature_parameters,
             {
-                "Filtre petits vaisseaux": "actif, longueur minimale 100 px",
+                "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
+                "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
                 "Pretraitement re-echantillonnage": "actif, pas 4.0 px",
             },
         )
-        self.assertEqual(arc_chord_parameters, {"Filtre petits vaisseaux": "actif, longueur minimale 100 px"})
+        self.assertEqual(
+            arc_chord_parameters,
+            {
+                "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
+                "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
+            },
+        )
 
 
 if __name__ == "__main__":
