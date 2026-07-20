@@ -5,12 +5,15 @@ Summary: Add your description here
 Requires-Python: <3.12,>=3.11
 Description-Content-Type: text/markdown
 Requires-Dist: matplotlib>=3.10.9
+Requires-Dist: llvmlite==0.44.0
+Requires-Dist: numba==0.61.2
 Requires-Dist: opencv-python>=4.13.0.92
 Requires-Dist: openpyxl>=3.1.5
 Requires-Dist: pandas>=3.0.3
 Requires-Dist: pillow>=12.2.0
 Requires-Dist: scikit-image>=0.26.0
 Requires-Dist: scipy>=1.17.1
+Requires-Dist: skan>=0.13.1
 Requires-Dist: streamlit>=1.45.1
 Provides-Extra: deep
 Requires-Dist: huggingface-hub>=1.15.0; extra == "deep"
@@ -23,8 +26,7 @@ Requires-Dist: vascx-simplify>=0.1.11; extra == "deep"
 
 ```bash
 uv sync                          # classical + Streamlit + skan
-uv sync --extra deep             # DCP / VascX backends
-uv sync --extra deep             # includes skan because it is a default dependency
+uv sync --extra deep             # DCP / VascX backends; skan is still included
 uv run streamlit run tortuosite_score/app/app.py
 ```
 
