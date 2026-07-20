@@ -147,6 +147,19 @@ class VesselSegmentTests(unittest.TestCase):
         self.assertFalse(resolution["bridge_success"])
         self.assertEqual(resolution["synthetic_links"], [])
 
+    def test_score_ignores_stale_invalid_synthetic_links(self) -> None:
+        first = VesselSegment.from_manual_points(1, [[0, 0], [20, 0]])
+        second = VesselSegment.from_manual_points(2, [[220, 0], [240, 0]])
+        stale_link = {"points": [[20, 0], [220, 0]], "length": 200.0}
+        segments = {first.ref: first, second.ref: second}
+
+        score = score_segments(segments, [first.ref, second.ref], synthetic_links=[stale_link])
+        points = ordered_points_for_segments(segments, [first.ref, second.ref], synthetic_links=[stale_link])
+
+        self.assertFalse(score["bridge_success"])
+        self.assertEqual(score["component_count"], 2)
+        self.assertEqual(points, [[0.0, 0.0], [20.0, 0.0]])
+
     def test_ordered_points_follow_saved_vessel_endpoints(self) -> None:
         segment = VesselSegment.from_manual_points(1, [[0, 0], [10, 0], [20, 0]])
         start = create_geometry_endpoint([20, 0], manual_segment_ref(1), 20.0)

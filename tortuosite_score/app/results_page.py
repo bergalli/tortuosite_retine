@@ -242,7 +242,6 @@ def build_results_viewer_segments(
     geometry_map = get_segment_geometry(branches_df, review_state.get("manual_segments", {}))
     segments: list[dict] = []
     labels: list[dict] = []
-    synthetic_index = 0
     for index, (vessel_name, vessel) in enumerate(sorted(review_state.get("vessels", {}).items()), start=1):
         del vessel_name
         color = ARTERE_COLOR if vessel.get("category") == "artere" else VEINE_COLOR
@@ -262,25 +261,6 @@ def build_results_viewer_segments(
                     "strokes": [{"color": color, "width": 3.4, "opacity": 1}],
                 }
             )
-        for synthetic_link in vessel.get("synthetic_links", []):
-            points = synthetic_link.get("points")
-            if not isinstance(points, list) or len(points) != 2:
-                continue
-            vessel_points.extend(points)
-            segments.append(
-                {
-                    "segmentRef": f"result-synthetic:{synthetic_index}",
-                    "source": "synthetic",
-                    "points": points,
-                    "label": None,
-                    "locked": True,
-                    "strokes": [
-                        {"color": color, "width": 5.2, "opacity": 0.45},
-                        {"color": color, "width": 2.6, "opacity": 1},
-                    ],
-                }
-            )
-            synthetic_index += 1
         if vessel_points:
             point_df = pd.DataFrame(vessel_points, columns=["x", "y"])
             labels.append(

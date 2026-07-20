@@ -629,7 +629,7 @@ def build_viewer_branches(
     allow_reuse_assigned: bool,
     provisional_synthetic_links: list[dict[str, object]] | None = None,
 ) -> list[dict]:
-    del paths_payload
+    del paths_payload, provisional_synthetic_links
     geometry_map = get_segment_geometry(branches_df, review_state.get("manual_segments", {}))
     memberships: dict[str, list[str]] = {segment_ref: [] for segment_ref in geometry_map}
     segment_vessels: dict[str, list[str]] = {segment_ref: [] for segment_ref in geometry_map}
@@ -691,15 +691,6 @@ def build_viewer_branches(
             }
         )
 
-    synthetic_index = 0
-    for vessel in review_state.get("vessels", {}).values():
-        color = ARTERE_COLOR if vessel.get("category") == "artere" else VEINE_COLOR
-        for synthetic_link in vessel.get("synthetic_links", []):
-            viewer_segments.append(_synthetic_viewer_segment(f"saved-synthetic:{synthetic_index}", synthetic_link, color))
-            synthetic_index += 1
-    for synthetic_link in provisional_synthetic_links or []:
-        viewer_segments.append(_synthetic_viewer_segment(f"provisional-synthetic:{synthetic_index}", synthetic_link, SELECTED_COLOR))
-        synthetic_index += 1
     return viewer_segments
 
 
@@ -717,8 +708,6 @@ def build_vessel_labels(
             geometry = geometry_map.get(segment_ref)
             if geometry is not None:
                 points.extend(geometry["points"])
-        for synthetic_link in vessel.get("synthetic_links", []):
-            points.extend(synthetic_link.get("points", []))
         if not points:
             continue
         point_df = pd.DataFrame(points, columns=["x", "y"])
@@ -731,17 +720,3 @@ def build_vessel_labels(
         )
     return labels
 
-
-def _synthetic_viewer_segment(segment_ref: str, synthetic_link: dict[str, object], color: str) -> dict:
-    return {
-        "segmentRef": segment_ref,
-        "source": "synthetic",
-        "points": synthetic_link["points"],
-        "label": None,
-        "labelColor": "#ffffff",
-        "locked": True,
-        "strokes": [
-            {"color": color, "width": 5.2, "opacity": 0.45},
-            {"color": color, "width": 2.6, "opacity": 1},
-        ],
-    }

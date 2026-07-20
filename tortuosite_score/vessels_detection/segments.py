@@ -277,6 +277,7 @@ def score_segments(
     adjacency = graph["adjacency"]
     segment_nodes = graph["segment_nodes"]
     components = graph["components"]
+    bridge_count = int(graph["accepted_synthetic_link_count"])
     if not components:
         return _empty_score(model_count, manual_count, branch_count=len(selected), bridge_success=False)
 
@@ -309,7 +310,6 @@ def score_segments(
     distances = shortest_paths(adjacency, start_node) if start_node is not None else {}
     path_length = float(distances.get(end_node, np.nan)) if end_node is not None else np.nan
     chord = float(distance(start["point"], end["point"])) if start and end else np.nan
-    bridge_count = len(synthetic_links or [])
     return {
         "model_segment_count": model_count,
         "manual_segment_count": manual_count,
@@ -597,19 +597,62 @@ def build_segment_graph(
             edge_length = distance(start_point, end_point)
             if edge_length > 0:
                 add_edge(adjacency, start_id, end_id, edge_length)
+    accepted_synthetic_link_count = 0
     for link in synthetic_links:
         points = link.get("points", [])
         if not isinstance(points, list) or len(points) != 2:
             continue
+        if not plausible_synthetic_link(link, segments, graph_nodes, adjacency, segment_nodes, join_tolerance):
+            continue
         start_node = register_graph_node(graph_nodes, [float(points[0][0]), float(points[0][1])], join_tolerance)
         end_node = register_graph_node(graph_nodes, [float(points[1][0]), float(points[1][1])], join_tolerance)
         add_edge(adjacency, start_node, end_node, float(link.get("length", distance(points[0], points[1]))))
+        accepted_synthetic_link_count += 1
     return {
         "graph_nodes": graph_nodes,
         "adjacency": adjacency,
         "segment_nodes": segment_nodes,
         "components": connected_components(adjacency),
+        "accepted_synthetic_link_count": accepted_synthetic_link_count,
     }
+
+
+def plausible_synthetic_link(
+    link: dict[str, object],
+    segments: dict[str, VesselSegment],
+    graph_nodes: list[dict[str, object]],
+    adjacency: dict[int, list[tuple[int, float]]],
+    segment_nodes: dict[str, list[int]],
+    join_tolerance: float,
+) -> bool:
+    points = link.get("points", [])
+    if not isinstance(points, list) or len(points) != 2:
+        return False
+    try:
+        point_a = [float(points[0][0]), float(points[0][1])]
+        point_b = [float(points[1][0]), float(points[1][1])]
+    except (TypeError, ValueError, IndexError):
+        return False
+    if distance(point_a, point_b) > SYNTHETIC_LINK_MAX_LENGTH:
+        return False
+    candidates = endpoint_candidates_for_component(
+        set(range(len(graph_nodes))),
+        segment_nodes,
+        segments,
+        graph_nodes,
+        adjacency,
+    )
+    starts = [candidate for candidate in candidates if distance(point_a, candidate["point"]) <= join_tolerance]
+    ends = [candidate for candidate in candidates if distance(point_b, candidate["point"]) <= join_tolerance]
+    return any(
+        synthetic_link_direction_compatible(start, end, SYNTHETIC_LINK_DIRECTION_COSINE)
+        for start in starts
+        for end in ends
+    ) or any(
+        synthetic_link_direction_compatible(end, start, SYNTHETIC_LINK_DIRECTION_COSINE)
+        for start in starts
+        for end in ends
+    )
 
 
 def register_graph_node(graph_nodes: list[dict[str, object]], point: list[float], tolerance: float) -> int:

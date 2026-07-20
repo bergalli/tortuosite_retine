@@ -16,6 +16,7 @@ from tortuosite_score.app.results_page import (
     _top_system_table,
     build_adjusted_pvalue_matrix,
     build_pvalue_matrix,
+    build_results_viewer_segments,
     build_result_rows,
     generate_results_pdf,
     tortuosity_values,
@@ -113,6 +114,25 @@ class ResultsPageTests(unittest.TestCase):
             visible.columns.tolist(),
             ["Label", "Vaisseau", "Categorie", "Longueur du trajet", "Corde", "Tortuosite"],
         )
+
+    def test_results_overlay_does_not_draw_synthetic_links(self) -> None:
+        review_state = {
+            "manual_segments": {
+                "1": {"points": [[0, 0], [20, 0]]},
+            },
+            "vessels": {
+                "temporal": {
+                    "category": "artere",
+                    "segment_refs": ["manual:1"],
+                    "synthetic_links": [{"points": [[20, 0], [200, 0]], "length": 180.0}],
+                }
+            },
+        }
+
+        segments, labels = build_results_viewer_segments(review_state, pd.DataFrame())
+
+        self.assertEqual([segment["source"] for segment in segments], ["manual"])
+        self.assertEqual(len(labels), 1)
 
     def test_pdf_generation_returns_pdf_bytes(self) -> None:
         result_table = pd.DataFrame(
