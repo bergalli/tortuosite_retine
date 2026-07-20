@@ -1,10 +1,8 @@
 # Run with
 
 ```bash
-uv sync                          # classical + Streamlit (no torch, no skan)
-uv sync --extra skan             # faster/more accurate skeleton branch analysis
-uv sync --extra deep             # DCP / VascX backends
-uv sync --extra skan --extra deep
+uv sync                          # classical + Streamlit + skan
+uv sync --extra deep             # DCP / VascX backends; skan is still included
 uv run streamlit run tortuosite_score/app/app.py
 ```
 

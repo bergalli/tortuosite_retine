@@ -2,7 +2,7 @@ Metadata-Version: 2.4
 Name: tortuosite-retine
 Version: 0.1.0
 Summary: Add your description here
-Requires-Python: >=3.12
+Requires-Python: <3.12,>=3.11
 Description-Content-Type: text/markdown
 Requires-Dist: matplotlib>=3.10.9
 Requires-Dist: opencv-python>=4.13.0.92
@@ -12,8 +12,6 @@ Requires-Dist: pillow>=12.2.0
 Requires-Dist: scikit-image>=0.26.0
 Requires-Dist: scipy>=1.17.1
 Requires-Dist: streamlit>=1.45.1
-Provides-Extra: skan
-Requires-Dist: skan>=0.13.1; extra == "skan"
 Provides-Extra: deep
 Requires-Dist: huggingface-hub>=1.15.0; extra == "deep"
 Requires-Dist: timm>=1.0.27; extra == "deep"
@@ -24,10 +22,9 @@ Requires-Dist: vascx-simplify>=0.1.11; extra == "deep"
 # Run with
 
 ```bash
-uv sync                          # classical + Streamlit (no torch, no skan)
-uv sync --extra skan             # faster/more accurate skeleton branch analysis
+uv sync                          # classical + Streamlit + skan
 uv sync --extra deep             # DCP / VascX backends
-uv sync --extra skan --extra deep
+uv sync --extra deep             # includes skan because it is a default dependency
 uv run streamlit run tortuosite_score/app/app.py
 ```
 

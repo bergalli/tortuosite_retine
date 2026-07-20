@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 
-SKAN_INSTALL_HINT = "uv sync --extra skan"
+SKAN_INSTALL_HINT = "uv sync"
 
 
 def skan_available() -> bool:
