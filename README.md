@@ -36,7 +36,7 @@ So the final method does **not** score the whole skeleton directly. The whole-sk
 - The Streamlit `Results` tab uses the active saved-vessel scoring method.
 - The PDF report uses the same active saved-vessel scoring method.
 - The CLI `tortuosite_score.vessels_detection.local_bump_score` accepts `--method` and uses the same centralized scoring service.
-- `Arc/chord`, `Courbure quadratique`, and `Tortuosity Density` can also be selected as primary methods; `Arc/chord` remains available as a diagnostic column.
+- `Local-bump v2 (experimental)`, `Arc/chord`, `Courbure quadratique`, and `Tortuosity Density` can also be selected as primary methods; `Arc/chord` remains available as a diagnostic column.
 
 ## Scoring method
 
@@ -140,6 +140,37 @@ The older geometric tortuosity is still exported for diagnosis only:
 \]
 
 It is no longer the default primary score.
+
+### Experimental Local-bump v2
+
+Local-bump v2 is available alongside the unchanged default method. It uses the same normalized saved-vessel geometry, with four fixed method parameters: a 4 px resampling step, a 5-point smoothing span, a minimum persistent-lobe angle of 0.15 rad, and an angularity weight of 0.25.
+
+The smoother does not restore raw endpoints, and the two-sample convolution boundary is excluded. Consecutive signed turns are grouped into curvature lobes; weak lobes are removed iteratively and equal-sign neighbors are merged. The retained oscillation and local angularity components are:
+
+\[
+O_v = E_v\sqrt{\frac{100N_v}{L_v}}, \qquad
+A_v = \operatorname{RMS}(\Delta\theta)\sqrt{\frac{100}{L_v}}
+\]
+
+and the experimental vessel score is:
+
+\[
+S_{v2}=1000\left(0.75O_v+0.25A_v\right)
+\]
+
+The classified-vessel workbook exports both v1 and v2 scores, both v2 components, persistent-lobe counts, endpoint maximum turn, and manual/model segment counts for audit.
+
+Expert calibration uses pairwise labels with columns `left_run`, `left_vessel`, `right_run`, `right_vessel`, and `judgment`, where judgment is `left`, `right`, or `similar`:
+
+```bash
+uv run python -m tortuosite_score.vessels_detection.local_bump_calibration \
+  --write-template expert_pairs.xlsx
+
+uv run python -m tortuosite_score.vessels_detection.local_bump_calibration \
+  expert_pairs.xlsx --runs-root demo/streamlit_runs
+```
+
+The calibration report selects parameters within patient-held-out folds, compares strict expert-pair concordance with local-bump v1, and recommends promotion only when the lower bound of the patient-level bootstrap improvement interval is non-negative. Until that evidence exists, v2 remains explicitly experimental and `local_bump` remains the default.
 
 ### Optional curvature-squared score
 

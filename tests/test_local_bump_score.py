@@ -15,6 +15,7 @@ from tortuosite_score.vessels_detection.local_bump_score import (
     LocalBumpSettings,
     curvature_squared_metrics,
     local_bump_metrics,
+    local_bump_v2_metrics,
     score_run,
     score_saved_vessels,
     score_root_to_leaf_systems,
@@ -27,6 +28,7 @@ from tortuosite_score.vessels_detection.scoring import (
     build_review_scores_table,
     scoring_config,
     scoring_method_fixed_parameters,
+    score_run as score_run_with_method,
     summarize_eye_score as summarize_saved_eye_score,
     score_saved_vessel,
 )
@@ -64,6 +66,44 @@ class LocalBumpMetricTests(unittest.TestCase):
         bumpy_score = local_bump_metrics(bumpy, settings)
 
         self.assertLess(jitter_score["branch_bump_score"], bumpy_score["branch_bump_score"] * 0.25)
+
+    def test_local_bump_v2_scores_persistent_waves_above_smooth_arc(self) -> None:
+        x = np.linspace(0, 240, 180)
+        waves = np.column_stack([x, 10.0 * np.sin(x / 9.0)])
+        theta = np.linspace(0, math.pi / 2, 180)
+        smooth_arc = np.column_stack([150.0 * np.cos(theta), 150.0 * np.sin(theta)])
+
+        wave_score = local_bump_v2_metrics(waves)
+        arc_score = local_bump_v2_metrics(smooth_arc)
+
+        self.assertGreater(wave_score["persistent_lobe_count"], arc_score["persistent_lobe_count"])
+        self.assertGreater(wave_score["local_bump_v2_score"], arc_score["local_bump_v2_score"])
+
+    def test_local_bump_v2_excludes_endpoint_filter_artifact(self) -> None:
+        points = [[0, 12], *[[x, 0] for x in range(4, 101, 4)]]
+
+        metrics = local_bump_v2_metrics(points)
+
+        self.assertGreater(metrics["endpoint_max_turn"], 0.0)
+        self.assertEqual(metrics["persistent_oscillation_count"], 0.0)
+        self.assertAlmostEqual(metrics["local_bump_v2_oscillation_component"], 0.0)
+
+    def test_local_bump_v2_removes_small_alternating_lobes(self) -> None:
+        x = np.linspace(0, 200, 160)
+        small_jitter = np.column_stack([x, 0.10 * np.sin(x / 2.0)])
+
+        metrics = local_bump_v2_metrics(small_jitter)
+
+        self.assertEqual(metrics["persistent_lobe_count"], 0.0)
+        self.assertGreaterEqual(metrics["local_bump_v2_score"], 0.0)
+
+    def test_local_bump_v2_short_and_duplicate_paths_are_safe(self) -> None:
+        short = local_bump_v2_metrics([[0, 0]])
+        duplicate = local_bump_v2_metrics([[0, 0], [0, 0], [0, 0]])
+
+        self.assertEqual(short["local_bump_v2_score"], 0.0)
+        self.assertEqual(duplicate["local_bump_v2_score"], 0.0)
+        self.assertTrue(math.isfinite(short["endpoint_max_turn"]))
 
     def test_curvature_squared_straight_line_scores_near_zero(self) -> None:
         points = [[0, 0], [10, 0], [20, 0], [30, 0]]
@@ -330,7 +370,10 @@ class CentralScoringServiceTests(unittest.TestCase):
     def test_method_registry_contains_arc_chord_and_local_bump(self) -> None:
         methods = {method.method_id for method in available_scoring_methods()}
 
-        self.assertEqual(methods, {"local_bump", "arc_chord", "curvature_squared", "tortuosity_density"})
+        self.assertEqual(
+            methods,
+            {"local_bump", "local_bump_v2", "arc_chord", "curvature_squared", "tortuosity_density"},
+        )
 
     def test_same_saved_vessel_can_be_scored_by_both_methods(self) -> None:
         points = [[0, 0], [20, 6], [40, -6], [60, 6], [80, 0]]
@@ -346,15 +389,18 @@ class CentralScoringServiceTests(unittest.TestCase):
 
         arc_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("arc_chord"))
         bump_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("local_bump"))
+        bump_v2_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("local_bump_v2"))
         curvature_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("curvature_squared"))
         density_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("tortuosity_density"))
 
         self.assertEqual(arc_score["scoring_method"], "arc_chord")
         self.assertEqual(bump_score["scoring_method"], "local_bump")
+        self.assertEqual(bump_v2_score["scoring_method"], "local_bump_v2")
         self.assertEqual(curvature_score["scoring_method"], "curvature_squared")
         self.assertEqual(density_score["scoring_method"], "tortuosity_density")
         self.assertAlmostEqual(float(arc_score["arc_chord_diagnostic"]), float(arc_score["primary_score"]))
         self.assertGreater(float(bump_score["local_bump_score"]), 0.0)
+        self.assertAlmostEqual(float(bump_v2_score["local_bump_v2_score"]), float(bump_v2_score["primary_score"]))
         self.assertAlmostEqual(
             float(curvature_score["curvature_squared_score"]),
             float(curvature_score["primary_score"]),
@@ -427,6 +473,34 @@ class CentralScoringServiceTests(unittest.TestCase):
             float(normalized_score["raw_primary_score"]),
             float(normalized_score["primary_score"]) / 4.0,
             places=6,
+        )
+
+    def test_local_bump_v2_uses_normalized_geometry(self) -> None:
+        def score_for(points: list[list[float]], scale: float) -> dict[str, object]:
+            segment = VesselSegment.from_manual_points(1, points)
+            segment_map = build_segment_map(pd.DataFrame(), {"1": segment.to_manual_payload()})
+            vessel = {
+                "category": "artere",
+                "segment_refs": [segment.ref],
+                "synthetic_links": [],
+                "start_endpoint": {"kind": "geometry_point", "point": points[0], "segment_ref": segment.ref},
+                "end_endpoint": {"kind": "geometry_point", "point": points[-1], "segment_ref": segment.ref},
+            }
+            return score_saved_vessel(
+                segment_map,
+                "v1",
+                vessel,
+                config=scoring_config("local_bump_v2"),
+                coordinate_scale=scale,
+            )
+
+        base = [[0, 0], [40, 12], [80, -12], [120, 12], [160, 0]]
+        enlarged = [[4 * x, 4 * y] for x, y in base]
+
+        self.assertAlmostEqual(
+            float(score_for(base, 1.0)["primary_score"]),
+            float(score_for(enlarged, 0.25)["primary_score"]),
+            places=10,
         )
 
     def test_tortuosity_density_eye_summary_is_length_weighted_without_tail_or_scale(self) -> None:
@@ -550,6 +624,7 @@ class CentralScoringServiceTests(unittest.TestCase):
         curvature_parameters = dict(scoring_method_fixed_parameters(scoring_config("curvature_squared")))
         arc_chord_parameters = dict(scoring_method_fixed_parameters(scoring_config("arc_chord")))
         density_parameters = dict(scoring_method_fixed_parameters(scoring_config("tortuosity_density")))
+        v2_parameters = dict(scoring_method_fixed_parameters(scoring_config("local_bump_v2")))
 
         self.assertIn("Seuil de courbure locale", local_bump_parameters)
         self.assertIn("Pas de re-echantillonnage", local_bump_parameters)
@@ -578,6 +653,47 @@ class CentralScoringServiceTests(unittest.TestCase):
                 "Seuil d'inflexion": "0.035 rad",
             },
         )
+        self.assertEqual(v2_parameters["Angle minimal d'un lobe persistant"], "0.150 rad")
+        self.assertEqual(v2_parameters["Poids de l'angularite"], "0.25")
+
+
+class LocalBumpV2DiagnosticExamplesTests(unittest.TestCase):
+    def test_reviewed_examples_show_expected_robustness(self) -> None:
+        runs_root = Path(__file__).parents[1] / "demo" / "streamlit_runs"
+        if not runs_root.exists():
+            self.skipTest("Saved diagnostic runs are not available.")
+        targets = {
+            "1_OD": ["1°A-inf"],
+            "5_OG": ["a destinée maculaire"],
+            "11_OG": ["1°A-sup"],
+            "9_OD": ["3°A-inf2"],
+            "7_OD": ["2°A-sup"],
+        }
+        old_scores: dict[tuple[str, str], float] = {}
+        new_scores: dict[tuple[str, str], float] = {}
+        for run_name, vessel_names in targets.items():
+            _summary, old = score_run_with_method(runs_root / run_name, scoring_config("local_bump"))
+            _summary, new = score_run_with_method(runs_root / run_name, scoring_config("local_bump_v2"))
+            for vessel_name in vessel_names:
+                old_scores[(run_name, vessel_name)] = float(
+                    old.loc[old["vessel_name"] == vessel_name, "primary_score"].iloc[0] * 1000.0
+                )
+                new_scores[(run_name, vessel_name)] = float(
+                    new.loc[new["vessel_name"] == vessel_name, "primary_score"].iloc[0]
+                )
+
+        aberrant = ("1_OD", "1°A-inf")
+        self.assertLess(new_scores[aberrant], old_scores[aberrant] * 0.60)
+        similar = [
+            new_scores[("11_OG", "1°A-sup")],
+            new_scores[("9_OD", "3°A-inf2")],
+            new_scores[("7_OD", "2°A-sup")],
+        ]
+        similar_mean = float(np.mean(similar))
+        self.assertTrue(all(abs(value - similar_mean) / similar_mean <= 0.25 for value in similar))
+        macular = new_scores[("5_OG", "a destinée maculaire")]
+        self.assertGreater(macular, max(similar))
+        self.assertGreater(macular, new_scores[aberrant])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from tortuosite_score.vessels_detection.local_bump_score import (
     curvature_squared_metrics,
     load_saved_run_branches,
     local_bump_metrics,
+    local_bump_v2_metrics,
     tail_weighted_mean,
     tortuosity_density_metrics,
     weighted_mean,
@@ -29,7 +30,13 @@ from tortuosite_score.vessels_detection.segments import (
     segment_ref_sort_key,
 )
 
-ScoringMethodId = Literal["local_bump", "arc_chord", "curvature_squared", "tortuosity_density"]
+ScoringMethodId = Literal[
+    "local_bump",
+    "local_bump_v2",
+    "arc_chord",
+    "curvature_squared",
+    "tortuosity_density",
+]
 DEFAULT_SCORING_METHOD: ScoringMethodId = "local_bump"
 
 
@@ -79,6 +86,30 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
             "S_oeil = 1000 x (0.70 x G + 0.30 x T)",
         ),
         eye_score_scale=DISPLAY_SCALE,
+    ),
+    "local_bump_v2": ScoringMethodSpec(
+        method_id="local_bump_v2",
+        label="Local-bump v2 (experimental)",
+        primary_score_label="Score local-bump v2",
+        eye_score_label="Score local-bump v2",
+        short_description="Combine les oscillations persistantes et l'angularite locale sans artefact aux extremites.",
+        report_method_title="score local-bump v2 experimental sur vaisseaux sauvegardes",
+        report_steps=(
+            "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
+            "2. Reconstituer et normaliser la ligne centrale ordonnee.",
+            "3. Exclure les vaisseaux trop courts selon le seuil actif.",
+            "4. Re-echantillonner puis lisser sans restaurer les extremites brutes.",
+            "5. Exclure la marge du filtre et fusionner les lobes de courbure non persistants.",
+            "6. Mesurer separement les oscillations persistantes et l'angularite locale.",
+            "7. Combiner les deux composantes avec le poids experimental fixe.",
+        ),
+        report_equations=(
+            "O_v = E_v x sqrt(100 x N_v / L_v)",
+            "A_v = RMS(Delta theta) x sqrt(100 / L_v)",
+            "S_v2 = 1000 x ((1 - w) x O_v + w x A_v)",
+            "S_oeil = somme(L_v x S_v2) / somme(L_v)",
+        ),
+        eye_score_scale=1.0,
     ),
     "arc_chord": ScoringMethodSpec(
         method_id="arc_chord",
@@ -156,7 +187,7 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
 def available_scoring_methods() -> list[ScoringMethodSpec]:
     return [
         SCORING_METHOD_SPECS[method_id]
-        for method_id in ["local_bump", "arc_chord", "curvature_squared", "tortuosity_density"]
+        for method_id in ["local_bump", "local_bump_v2", "arc_chord", "curvature_squared", "tortuosity_density"]
     ]
 
 
@@ -183,7 +214,15 @@ def scoring_method_fixed_parameters(config: ScoringConfig | None = None) -> list
         ("Normalisation geometrie", f"diametre du fond d'oeil ramene a {REFERENCE_FUNDUS_DIAMETER:.0f} px"),
         ("Filtre petits vaisseaux", filter_label.replace(" px", " px normalises")),
     ]
-    if config.method_id in {"local_bump", "tortuosity_density"}:
+    if config.method_id in {"local_bump", "local_bump_v2", "tortuosity_density"}:
+        if config.method_id == "local_bump_v2":
+            return [
+                *shared_parameters,
+                ("Pas de re-echantillonnage", f"{settings.resample_step:.1f} px"),
+                ("Fenetre de lissage", f"{settings.smoothing_window} points"),
+                ("Angle minimal d'un lobe persistant", f"{settings.min_persistent_lobe_angle:.3f} rad"),
+                ("Poids de l'angularite", f"{settings.local_bump_v2_angularity_weight:.2f}"),
+            ]
         return [
             *shared_parameters,
             ("Pas de re-echantillonnage", f"{settings.resample_step:.1f} px"),
@@ -253,9 +292,11 @@ def score_saved_vessel(
     raw_path_points = np.asarray(path_points, dtype=float)
     normalized_path_points = raw_path_points * scale
     raw_local_metrics = local_bump_metrics(raw_path_points, settings)
+    raw_local_v2_metrics = local_bump_v2_metrics(raw_path_points, settings)
     raw_curvature_metrics = curvature_squared_metrics(raw_path_points, settings)
     raw_density_metrics = tortuosity_density_metrics(raw_path_points, settings)
     local_metrics = local_bump_metrics(normalized_path_points, settings)
+    local_v2_metrics = local_bump_v2_metrics(normalized_path_points, settings)
     curvature_metrics = curvature_squared_metrics(normalized_path_points, settings)
     density_metrics = tortuosity_density_metrics(normalized_path_points, settings)
     raw_path_length = float(diagnostic.get("length", math.nan))
@@ -266,6 +307,9 @@ def score_saved_vessel(
     if config.method_id == "local_bump":
         primary_score = float(local_metrics["branch_bump_score"])
         raw_primary_score = float(raw_local_metrics["branch_bump_score"])
+    elif config.method_id == "local_bump_v2":
+        primary_score = float(local_v2_metrics["local_bump_v2_score"])
+        raw_primary_score = float(raw_local_v2_metrics["local_bump_v2_score"])
     elif config.method_id == "curvature_squared":
         primary_score = float(curvature_metrics["curvature_squared_score"])
         raw_primary_score = float(raw_curvature_metrics["curvature_squared_score"])
@@ -314,6 +358,14 @@ def score_saved_vessel(
         "oscillation_count": float(local_metrics["oscillation_count"]),
         "oscillation_density": float(local_metrics["oscillation_density"]),
         "local_bump_score": float(local_metrics["branch_bump_score"]),
+        "local_bump_v2_score": float(local_v2_metrics["local_bump_v2_score"]),
+        "local_bump_v2_oscillation_component": float(local_v2_metrics["local_bump_v2_oscillation_component"]),
+        "local_bump_v2_angularity_component": float(local_v2_metrics["local_bump_v2_angularity_component"]),
+        "persistent_lobe_count": float(local_v2_metrics["persistent_lobe_count"]),
+        "persistent_oscillation_count": float(local_v2_metrics["persistent_oscillation_count"]),
+        "persistent_oscillation_density": float(local_v2_metrics["persistent_oscillation_density"]),
+        "persistent_local_bump_energy": float(local_v2_metrics["persistent_local_bump_energy"]),
+        "endpoint_max_turn": float(local_v2_metrics["endpoint_max_turn"]),
         "curvature_squared_score": float(curvature_metrics["curvature_squared_score"]),
         "curvature_squared_integral": float(curvature_metrics["curvature_squared_integral"]),
         "mean_curvature": float(curvature_metrics["mean_curvature"]),
@@ -521,10 +573,13 @@ def score_branch_fragments(
     rows: list[dict[str, object]] = []
     for _, row in branches.iterrows():
         metrics = local_bump_metrics(row["path_points"], settings)
+        v2_metrics = local_bump_v2_metrics(row["path_points"], settings)
         curvature_metrics = curvature_squared_metrics(row["path_points"], settings)
         density_metrics = tortuosity_density_metrics(row["path_points"], settings)
         if config.method_id == "local_bump":
             primary_score = metrics["branch_bump_score"]
+        elif config.method_id == "local_bump_v2":
+            primary_score = v2_metrics["local_bump_v2_score"]
         elif config.method_id == "curvature_squared":
             primary_score = curvature_metrics["curvature_squared_score"]
         elif config.method_id == "tortuosity_density":
@@ -543,6 +598,7 @@ def score_branch_fragments(
                 "eligible": _is_branch_fragment_eligible(float(metrics["branch_length"]), config)
                 and math.isfinite(float(primary_score)),
                 **metrics,
+                **v2_metrics,
                 **curvature_metrics,
                 **density_metrics,
             }
@@ -568,6 +624,15 @@ def build_manual_vessels_export(
                 "path_length",
                 "chord_length",
                 "arc_chord_diagnostic",
+                "local_bump_score",
+                "local_bump_v2_score",
+                "local_bump_v2_oscillation_component",
+                "local_bump_v2_angularity_component",
+                "persistent_lobe_count",
+                "persistent_oscillation_count",
+                "persistent_oscillation_density",
+                "persistent_local_bump_energy",
+                "endpoint_max_turn",
                 "curvature_squared_score",
                 "curvature_squared_integral",
                 "mean_curvature",
@@ -607,6 +672,14 @@ def build_manual_vessels_export(
                 "oscillation_count": row["oscillation_count"],
                 "oscillation_density": row["oscillation_density"],
                 "local_bump_score": row["local_bump_score"],
+                "local_bump_v2_score": row["local_bump_v2_score"],
+                "local_bump_v2_oscillation_component": row["local_bump_v2_oscillation_component"],
+                "local_bump_v2_angularity_component": row["local_bump_v2_angularity_component"],
+                "persistent_lobe_count": row["persistent_lobe_count"],
+                "persistent_oscillation_count": row["persistent_oscillation_count"],
+                "persistent_oscillation_density": row["persistent_oscillation_density"],
+                "persistent_local_bump_energy": row["persistent_local_bump_energy"],
+                "endpoint_max_turn": row["endpoint_max_turn"],
                 "curvature_squared_score": row["curvature_squared_score"],
                 "curvature_squared_integral": row["curvature_squared_integral"],
                 "mean_curvature": row["mean_curvature"],
@@ -639,6 +712,8 @@ def build_review_scores_table(
                 "Categorie": row["category"],
                 "Methode": row["scoring_method_label"],
                 "Score principal": row["primary_score"],
+                "Local-bump v1 diagnostic": row["local_bump_score"] * DISPLAY_SCALE,
+                "Local-bump v2 diagnostic": row["local_bump_v2_score"],
                 "Arc/chord diagnostic": row["arc_chord_diagnostic"],
                 "Courbure^2 diagnostic": row["curvature_squared_score"],
                 "Tortuosity Density diagnostic": row["tortuosity_density_score"],
@@ -663,6 +738,12 @@ def top_contributing_vessels(vessel_scores: pd.DataFrame, limit: int = 8) -> lis
         "category",
         "bridge_count",
         "oscillation_count",
+        "local_bump_score",
+        "local_bump_v2_score",
+        "local_bump_v2_oscillation_component",
+        "local_bump_v2_angularity_component",
+        "persistent_lobe_count",
+        "endpoint_max_turn",
         "curvature_squared_score",
         "tortuosity_density_score",
         "constant_curvature_segment_count",

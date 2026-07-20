@@ -191,6 +191,15 @@ class ClinicalExcelTests(unittest.TestCase):
             "analysis_exclusion_reason",
             "score_raw",
             "score_normalized",
+            "local_bump_v1_score",
+            "local_bump_v2_score",
+            "local_bump_v2_oscillation_component",
+            "local_bump_v2_angularity_component",
+            "persistent_lobe_count",
+            "persistent_oscillation_count",
+            "endpoint_max_turn",
+            "model_segment_count",
+            "manual_segment_count",
         ]
         self.assertEqual(
             clean.columns.tolist(),

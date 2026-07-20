@@ -174,6 +174,15 @@ def _classified_long_format(data: pd.DataFrame) -> pd.DataFrame:
             "diametre_reference_px": "reference_diameter_px",
             "eligible_analyse": "analysis_eligible",
             "raison_exclusion_analyse": "analysis_exclusion_reason",
+            "score_local_bump_v1": "local_bump_v1_score",
+            "score_local_bump_v2": "local_bump_v2_score",
+            "composante_oscillation_v2": "local_bump_v2_oscillation_component",
+            "composante_angularite_v2": "local_bump_v2_angularity_component",
+            "nombre_lobes_persistants": "persistent_lobe_count",
+            "nombre_oscillations_persistantes": "persistent_oscillation_count",
+            "tour_maximal_extremites": "endpoint_max_turn",
+            "segments_modele": "model_segment_count",
+            "segments_manuels": "manual_segment_count",
         }
     )
     table["group"] = table["group"].replace({"temoin": "control"})
@@ -208,6 +217,16 @@ def _raw_export_columns() -> list[str]:
         # Final score values.
         "score_raw",
         "score_normalized",
+        # Auditable local-bump v1/v2 components and geometry source.
+        "local_bump_v1_score",
+        "local_bump_v2_score",
+        "local_bump_v2_oscillation_component",
+        "local_bump_v2_angularity_component",
+        "persistent_lobe_count",
+        "persistent_oscillation_count",
+        "endpoint_max_turn",
+        "model_segment_count",
+        "manual_segment_count",
     ]
 
 
@@ -298,6 +317,21 @@ def build_structured_vessel_data(
                     "raison_exclusion_analyse": exclusion_reason,
                     "methode_id": method.method_id,
                     "methode": score_row.get("scoring_method_label"),
+                    "score_local_bump_v1": _finite_float(score_row.get("local_bump_score")) * 1000.0,
+                    "score_local_bump_v2": _finite_float(score_row.get("local_bump_v2_score")),
+                    "composante_oscillation_v2": _finite_float(
+                        score_row.get("local_bump_v2_oscillation_component")
+                    ),
+                    "composante_angularite_v2": _finite_float(
+                        score_row.get("local_bump_v2_angularity_component")
+                    ),
+                    "nombre_lobes_persistants": _finite_float(score_row.get("persistent_lobe_count")),
+                    "nombre_oscillations_persistantes": _finite_float(
+                        score_row.get("persistent_oscillation_count")
+                    ),
+                    "tour_maximal_extremites": _finite_float(score_row.get("endpoint_max_turn")),
+                    "segments_modele": _finite_float(score_row.get("model_segment_count")),
+                    "segments_manuels": _finite_float(score_row.get("manual_segment_count")),
                     "tortuosity_density_score": _finite_float(score_row.get("tortuosity_density_score")),
                     "sous_segments_courbure_constante": _finite_float(
                         score_row.get("constant_curvature_segment_count")
@@ -1230,6 +1264,20 @@ def _structured_columns() -> list[str]:
         "raison_exclusion_analyse",
         "methode_id",
         "methode",
+        "score_local_bump_v1",
+        "score_local_bump_v2",
+        "composante_oscillation_v2",
+        "composante_angularite_v2",
+        "nombre_lobes_persistants",
+        "nombre_oscillations_persistantes",
+        "tour_maximal_extremites",
+        "segments_modele",
+        "segments_manuels",
+        "tortuosity_density_score",
+        "sous_segments_courbure_constante",
+        "nombre_inflexions",
+        "exces_arc_corde_tortuosity_density",
+        "geometrie_tortuosity_density_valide",
         "poids_global",
         "poids_queue_haute",
         "fraction_queue_haute",

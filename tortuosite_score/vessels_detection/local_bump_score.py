@@ -27,6 +27,8 @@ DEFAULT_MIN_BRANCH_LENGTH = 50.0
 DEFAULT_RESAMPLE_STEP = 4.0
 DEFAULT_SMOOTHING_WINDOW = 5
 DEFAULT_CURVATURE_THRESHOLD = 0.035
+DEFAULT_MIN_PERSISTENT_LOBE_ANGLE = 0.15
+DEFAULT_LOCAL_BUMP_V2_ANGULARITY_WEIGHT = 0.25
 DEFAULT_TAIL_LENGTH_FRACTION = 0.20
 DEFAULT_GLOBAL_WEIGHT = 0.70
 DEFAULT_TAIL_WEIGHT = 0.30
@@ -45,6 +47,8 @@ class LocalBumpSettings:
     resample_step: float = DEFAULT_RESAMPLE_STEP
     smoothing_window: int = DEFAULT_SMOOTHING_WINDOW
     curvature_threshold: float = DEFAULT_CURVATURE_THRESHOLD
+    min_persistent_lobe_angle: float = DEFAULT_MIN_PERSISTENT_LOBE_ANGLE
+    local_bump_v2_angularity_weight: float = DEFAULT_LOCAL_BUMP_V2_ANGULARITY_WEIGHT
     tail_length_fraction: float = DEFAULT_TAIL_LENGTH_FRACTION
     global_weight: float = DEFAULT_GLOBAL_WEIGHT
     tail_weight: float = DEFAULT_TAIL_WEIGHT
@@ -90,6 +94,70 @@ def local_bump_metrics(
         "oscillation_count": float(oscillation_count),
         "oscillation_density": oscillation_density,
         "branch_bump_score": branch_bump_score,
+    }
+
+
+def local_bump_v2_metrics(
+    points: list[list[float]] | np.ndarray,
+    settings: LocalBumpSettings | None = None,
+) -> dict[str, float]:
+    """Score persistent oscillations plus endpoint-safe local angularity.
+
+    Unlike :func:`local_bump_metrics`, this experimental variant does not
+    restore raw endpoints after smoothing. It also removes the convolution
+    boundary before measuring turns and filters whole curvature lobes instead
+    of thresholding individual samples.
+    """
+    settings = settings or LocalBumpSettings()
+    path = _prepare_path(points)
+    if len(path) < 2:
+        return _empty_local_bump_v2_metrics()
+
+    branch_length = polyline_length(path)
+    chord_length = float(np.linalg.norm(path[-1] - path[0]))
+    if branch_length <= 0:
+        return _empty_local_bump_v2_metrics(branch_length, chord_length)
+
+    resampled = resample_polyline(path, settings.resample_step)
+    smoothed, boundary_margin = smooth_polyline_endpoint_safe(resampled, settings.smoothing_window)
+    all_angle_change = local_angle_change(smoothed)
+    endpoint_max_turn = _endpoint_max_turn(all_angle_change, boundary_margin)
+    if boundary_margin > 0:
+        if len(all_angle_change) <= 2 * boundary_margin:
+            return _empty_local_bump_v2_metrics(branch_length, chord_length, endpoint_max_turn)
+        angle_change = all_angle_change[boundary_margin:-boundary_margin]
+    else:
+        angle_change = all_angle_change
+    if angle_change.size == 0:
+        return _empty_local_bump_v2_metrics(branch_length, chord_length, endpoint_max_turn)
+
+    lobes = persistent_curvature_lobes(angle_change, settings.min_persistent_lobe_angle)
+    retained_turns = np.asarray([turn for _sign, turns in lobes for turn in turns], dtype=float)
+    persistent_lobe_count = len(lobes)
+    oscillation_count = max(persistent_lobe_count - 1, 0)
+    oscillation_density = float(oscillation_count / branch_length * 100.0)
+    persistent_energy = (
+        float(np.sum(np.abs(retained_turns)) / len(angle_change)) if retained_turns.size else 0.0
+    )
+    oscillation_component = (
+        float(persistent_energy * math.sqrt(oscillation_density)) if oscillation_density > 0 else 0.0
+    )
+    angularity_component = float(np.sqrt(np.mean(angle_change * angle_change)) * math.sqrt(100.0 / branch_length))
+    weight = float(np.clip(settings.local_bump_v2_angularity_weight, 0.0, 1.0))
+    score = float(DISPLAY_SCALE * ((1.0 - weight) * oscillation_component + weight * angularity_component))
+    arc_chord_tortuosity = float(branch_length / chord_length) if chord_length > 0 else math.nan
+    return {
+        "local_bump_v2_score": score,
+        "local_bump_v2_oscillation_component": oscillation_component,
+        "local_bump_v2_angularity_component": angularity_component,
+        "persistent_lobe_count": float(persistent_lobe_count),
+        "persistent_oscillation_count": float(oscillation_count),
+        "persistent_oscillation_density": oscillation_density,
+        "persistent_local_bump_energy": persistent_energy,
+        "endpoint_max_turn": endpoint_max_turn,
+        "local_bump_v2_branch_length": float(branch_length),
+        "local_bump_v2_chord_length": chord_length,
+        "local_bump_v2_arc_chord_tortuosity": arc_chord_tortuosity,
     }
 
 
@@ -947,6 +1015,73 @@ def smooth_polyline(points: np.ndarray, window: int) -> np.ndarray:
     return smoothed
 
 
+def smooth_polyline_endpoint_safe(points: np.ndarray, window: int) -> tuple[np.ndarray, int]:
+    """Centered moving average without reintroducing unsmoothed endpoints."""
+    normalized_window = _effective_smoothing_window(len(points), window)
+    if normalized_window < 3:
+        return points.copy(), 0
+    pad = normalized_window // 2
+    kernel = np.ones(normalized_window, dtype=float) / float(normalized_window)
+    padded = np.pad(points, ((pad, pad), (0, 0)), mode="edge")
+    smoothed = np.column_stack(
+        [
+            np.convolve(padded[:, 0], kernel, mode="valid"),
+            np.convolve(padded[:, 1], kernel, mode="valid"),
+        ]
+    )
+    return smoothed, pad
+
+
+def _effective_smoothing_window(point_count: int, window: int) -> int:
+    if point_count < 3 or int(window) < 3:
+        return 1
+    window = int(window)
+    if window % 2 == 0:
+        window += 1
+    if point_count <= window:
+        window = max(3, point_count if point_count % 2 == 1 else point_count - 1)
+    return window if window >= 3 else 1
+
+
+def _endpoint_max_turn(angle_change: np.ndarray, boundary_margin: int) -> float:
+    if angle_change.size == 0 or boundary_margin <= 0:
+        return 0.0
+    boundary = np.concatenate([angle_change[:boundary_margin], angle_change[-boundary_margin:]])
+    return float(np.max(np.abs(boundary))) if boundary.size else 0.0
+
+
+def persistent_curvature_lobes(
+    angle_change: np.ndarray,
+    minimum_total_angle: float,
+) -> list[tuple[int, list[float]]]:
+    """Return same-sign turn runs after iteratively removing weak lobes."""
+    lobes: list[tuple[int, list[float]]] = []
+    for raw_turn in np.asarray(angle_change, dtype=float):
+        turn = float(raw_turn)
+        if not math.isfinite(turn) or abs(turn) <= 1e-12:
+            continue
+        sign = 1 if turn > 0 else -1
+        if lobes and lobes[-1][0] == sign:
+            lobes[-1][1].append(turn)
+        else:
+            lobes.append((sign, [turn]))
+
+    threshold = max(float(minimum_total_angle), 0.0)
+    while lobes:
+        weak_indices = [
+            index for index, (_sign, turns) in enumerate(lobes) if abs(float(sum(turns))) < threshold
+        ]
+        if not weak_indices:
+            break
+        weakest = min(weak_indices, key=lambda index: abs(float(sum(lobes[index][1]))))
+        lobes.pop(weakest)
+        if 0 < weakest < len(lobes) and lobes[weakest - 1][0] == lobes[weakest][0]:
+            merged = lobes[weakest - 1][1] + lobes[weakest][1]
+            lobes[weakest - 1] = (lobes[weakest - 1][0], merged)
+            lobes.pop(weakest)
+    return lobes
+
+
 def local_angle_change(points: np.ndarray) -> np.ndarray:
     if len(points) < 3:
         return np.array([], dtype=float)
@@ -1077,6 +1212,26 @@ def _empty_branch_metrics(branch_length: float = 0.0, chord_length: float = 0.0)
     }
 
 
+def _empty_local_bump_v2_metrics(
+    branch_length: float = 0.0,
+    chord_length: float = 0.0,
+    endpoint_max_turn: float = 0.0,
+) -> dict[str, float]:
+    return {
+        "local_bump_v2_score": 0.0,
+        "local_bump_v2_oscillation_component": 0.0,
+        "local_bump_v2_angularity_component": 0.0,
+        "persistent_lobe_count": 0.0,
+        "persistent_oscillation_count": 0.0,
+        "persistent_oscillation_density": 0.0,
+        "persistent_local_bump_energy": 0.0,
+        "endpoint_max_turn": float(endpoint_max_turn),
+        "local_bump_v2_branch_length": float(branch_length),
+        "local_bump_v2_chord_length": float(chord_length),
+        "local_bump_v2_arc_chord_tortuosity": math.nan,
+    }
+
+
 def _empty_curvature_squared_metrics(branch_length: float = 0.0, chord_length: float = 0.0) -> dict[str, float]:
     del branch_length, chord_length
     return {
@@ -1177,7 +1332,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-all-runs", action="store_true")
     parser.add_argument(
         "--method",
-        choices=["local_bump", "arc_chord", "curvature_squared", "tortuosity_density"],
+        choices=["local_bump", "local_bump_v2", "arc_chord", "curvature_squared", "tortuosity_density"],
         default="local_bump",
     )
     parser.add_argument("--min-branch-length", type=float, default=DEFAULT_MIN_BRANCH_LENGTH)

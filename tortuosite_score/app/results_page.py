@@ -67,6 +67,12 @@ LOCAL_BUMP_METHOD_EXPLANATION = (
     "virage regulier reste peu penalise, alors qu'un vaisseau presque droit mais bossue ou ondule obtient un score "
     "plus eleve."
 )
+LOCAL_BUMP_V2_METHOD_EXPLANATION = (
+    "Cette variante experimentale conserve les vaisseaux sauvegardes et la normalisation du modele actuel. "
+    "Elle lisse la ligne centrale sans restaurer les extremites brutes, exclut la marge du filtre, puis regroupe "
+    "les changements d'angle en lobes de courbure persistants. Le score combine la charge d'oscillation ainsi "
+    "nettoyee avec une composante d'angularite locale. Le local-bump v1 reste disponible sans modification."
+)
 CURVATURE_SQUARED_METHOD_EXPLANATION = (
     "Le score actuel est calcule uniquement sur les vaisseaux sauvegardes. Pour chaque vaisseau, la ligne centrale "
     "ordonnee est re-echantillonnee puis legerement lissee. La courbure locale est estimee numeriquement le long de "
@@ -129,6 +135,11 @@ MODEL_DESCRIPTION_BY_METHOD = {
         "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
         "Il re-echantillonne et lisse la ligne centrale pour detecter les inflexions significatives, sans ajouter de parametre propre a cette methode.",
         "Il mesure ensuite les arcs et les cordes sur la geometrie normalisee non lissee et applique tau_TD = ((n - 1) / L) x somme(L_i / C_i - 1).",
+    ],
+    "local_bump_v2": [
+        "Le modele experimental analyse les memes vaisseaux sauvegardes que le local-bump v1.",
+        "Il applique un lissage sans restauration des extremites, exclut la marge du filtre et supprime les lobes de courbure non persistants.",
+        "Il combine une composante d'oscillation persistante et une composante d'angularite; les deux composantes sont exportees pour audit.",
     ],
     "local_bump": [
         "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
@@ -619,6 +630,16 @@ def _build_all_systems_table(scored_runs: list[tuple[Path, dict[str, object], pd
                     "Categorie": row.get("category"),
                     "Methode": row.get("scoring_method_label"),
                     "Score vaisseau": row.get("primary_score"),
+                    "Local-bump v1 diagnostic": (
+                        float(row.get("local_bump_score")) * 1000.0
+                        if pd.notna(row.get("local_bump_score"))
+                        else math.nan
+                    ),
+                    "Local-bump v2 diagnostic": row.get("local_bump_v2_score"),
+                    "Oscillation persistante": row.get("local_bump_v2_oscillation_component"),
+                    "Angularite locale": row.get("local_bump_v2_angularity_component"),
+                    "Lobes persistants": row.get("persistent_lobe_count"),
+                    "Tour maximal aux extremites": row.get("endpoint_max_turn"),
                     "Longueur": row.get("vessel_length"),
                     "Segments": row.get("segment_count"),
                     "Ponts": row.get("bridge_count"),
@@ -739,6 +760,7 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
     ax.axis("off")
     ax.text(0.08, 0.94, "Methode de calcul", va="top", fontsize=16, fontweight="bold")
     explanation = {
+        "local_bump_v2": LOCAL_BUMP_V2_METHOD_EXPLANATION,
         "arc_chord": ARC_CHORD_METHOD_EXPLANATION,
         "curvature_squared": CURVATURE_SQUARED_METHOD_EXPLANATION,
         "tortuosity_density": TORTUOSITY_DENSITY_METHOD_EXPLANATION,
@@ -751,6 +773,11 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
         steps[4] = f"5. Lisser legerement la ligne centrale: fenetre {settings.smoothing_window} points."
     if method.method_id == "local_bump":
         steps[6] = f"7. Ignorer les changements minuscules: seuil {settings.curvature_threshold:.3f} rad."
+    elif method.method_id == "local_bump_v2":
+        steps[2] = f"3. Normaliser le fond d'oeil puis exclure les vaisseaux sous {settings.min_saved_vessel_length:.0f} px normalises."
+        steps[3] = f"4. Re-echantillonner tous les {settings.resample_step:.1f} px et lisser sur {settings.smoothing_window} points sans restaurer les extremites."
+        steps[4] = f"5. Exclure la marge derivee du filtre et supprimer les lobes sous {settings.min_persistent_lobe_angle:.3f} rad."
+        steps[6] = f"7. Combiner avec un poids d'angularite w = {settings.local_bump_v2_angularity_weight:.2f}."
     elif method.method_id == "tortuosity_density":
         steps[2] = f"3. Normaliser le diametre du fond d'oeil a 1024 px, puis exclure les vaisseaux sous {settings.min_saved_vessel_length:.0f} px normalises."
         steps[3] = f"4. Re-echantillonner tous les {settings.resample_step:.1f} px et lisser sur {settings.smoothing_window} points pour detecter les inflexions."
