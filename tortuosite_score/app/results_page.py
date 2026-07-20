@@ -78,10 +78,20 @@ ARC_CHORD_METHOD_EXPLANATION = (
     "ordonne est comparee a la corde entre le point de depart et le point d'arrivee. Le rapport arc/chord mesure donc "
     "l'allongement global du vaisseau."
 )
+TORTUOSITY_DENSITY_METHOD_EXPLANATION = (
+    "Le score actuel est calcule uniquement sur les vaisseaux sauvegardes. La ligne centrale est re-echantillonnee "
+    "et lissee uniquement pour reperer les changements significatifs du signe de la courbure. Ces inflexions "
+    "decoupent le vaisseau en sous-segments. Les longueurs d'arc et les cordes utilisees par la formule sont ensuite "
+    "mesurees sur la geometrie normalisee non lissee. Une courbe de convexite constante a un score nul."
+)
 HYBRID_SCORE_EXPLANATION = (
     "Le score final de l'oeil combine une moyenne des vaisseaux sauvegardes ponderee par la longueur et une composante "
     "de queue superieure pour que quelques vaisseaux tres bossues ne soient pas dilues par de nombreux vaisseaux "
     "normaux. Le score comparatif est normalise dans la cohorte du rapport."
+)
+LENGTH_WEIGHTED_SCORE_EXPLANATION = (
+    "Le score final de l'oeil est la moyenne des scores des vaisseaux retenus, ponderee par leur longueur. "
+    "Aucune composante de queue superieure ni aucun multiplicateur d'affichage n'est applique."
 )
 LOCAL_BUMP_EQUATION_LINES = [
     "Pour un vaisseau sauvegarde v, apres re-echantillonnage et lissage leger:",
@@ -114,6 +124,11 @@ MODEL_DESCRIPTION_BY_METHOD = {
         "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
         "Pour chaque vaisseau, il reconstruit la ligne centrale ordonnee puis applique la formule T = (1 / L) integral kappa(s)^2 ds.",
         "Le re-echantillonnage, quand il est actif, est un pretraitement numerique avant l'estimation des derivees; il ne change pas la formule appliquee ensuite.",
+    ],
+    "tortuosity_density": [
+        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
+        "Il re-echantillonne et lisse la ligne centrale pour detecter les inflexions significatives, sans ajouter de parametre propre a cette methode.",
+        "Il mesure ensuite les arcs et les cordes sur la geometrie normalisee non lissee et applique tau_TD = ((n - 1) / L) x somme(L_i / C_i - 1).",
     ],
     "local_bump": [
         "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
@@ -498,25 +513,35 @@ def _build_local_bump_pvalue_matrices(
 def _analysis_eligible_primary_scores(system_scores: pd.DataFrame) -> list[float]:
     """Scores from the same vessels exported in the raw Excel Clean_vessels sheet."""
 
-    required_columns = {"vessel_name", "vessel_length", "primary_score"}
-    if system_scores.empty or not required_columns.issubset(system_scores.columns):
+    eligible = _analysis_eligible_system_scores(system_scores)
+    if eligible.empty or "primary_score" not in eligible.columns:
         return []
     scores: list[float] = []
-    for _, row in system_scores.iterrows():
-        is_eligible, _reason = analysis_vessel_eligibility(
-            str(row.get("vessel_name", "")),
-            row.get("category"),
-            row.get("vessel_length"),
-        )
-        if not is_eligible:
-            continue
+    for value in eligible["primary_score"]:
         try:
-            numeric = float(row["primary_score"])
+            numeric = float(value)
         except (TypeError, ValueError):
             continue
         if math.isfinite(numeric):
             scores.append(numeric)
     return scores
+
+
+def _analysis_eligible_system_scores(system_scores: pd.DataFrame) -> pd.DataFrame:
+    """Rows matching Clean_vessels / analysis_vessel_eligibility (ranked arteries only)."""
+
+    required_columns = {"vessel_name", "vessel_length"}
+    if system_scores.empty or not required_columns.issubset(system_scores.columns):
+        return pd.DataFrame()
+    keep_mask = [
+        analysis_vessel_eligibility(
+            str(row.get("vessel_name", "")),
+            row.get("category"),
+            row.get("vessel_length"),
+        )[0]
+        for _, row in system_scores.iterrows()
+    ]
+    return system_scores.loc[keep_mask].copy()
 
 
 def _eligible_primary_scores(system_scores: pd.DataFrame) -> list[float]:
@@ -582,9 +607,9 @@ def _column_total(table: pd.DataFrame, column: str) -> float:
 def _build_all_systems_table(scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for run_dir, summary, vessel_scores in scored_runs:
-        if vessel_scores.empty or "eligible" not in vessel_scores.columns:
+        eligible = _analysis_eligible_system_scores(vessel_scores)
+        if eligible.empty:
             continue
-        eligible = vessel_scores[vessel_scores["eligible"]].copy()
         for _, row in eligible.iterrows():
             rows.append(
                 {
@@ -598,6 +623,9 @@ def _build_all_systems_table(scored_runs: list[tuple[Path, dict[str, object], pd
                     "Segments": row.get("segment_count"),
                     "Ponts": row.get("bridge_count"),
                     "Courbure^2 diagnostic": row.get("curvature_squared_score"),
+                    "Tortuosity Density diagnostic": row.get("tortuosity_density_score"),
+                    "Sous-segments de courbure": row.get("constant_curvature_segment_count"),
+                    "Inflexions": row.get("inflection_count"),
                     "Oscillations": row.get("oscillation_count"),
                     "_run_dir": run_dir,
                     "_path_points": row.get("path_points"),
@@ -713,6 +741,7 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
     explanation = {
         "arc_chord": ARC_CHORD_METHOD_EXPLANATION,
         "curvature_squared": CURVATURE_SQUARED_METHOD_EXPLANATION,
+        "tortuosity_density": TORTUOSITY_DENSITY_METHOD_EXPLANATION,
     }.get(method.method_id, LOCAL_BUMP_METHOD_EXPLANATION)
     ax.text(0.08, 0.88, explanation, va="top", fontsize=10, wrap=True)
     steps = list(method.report_steps)
@@ -722,8 +751,13 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
         steps[4] = f"5. Lisser legerement la ligne centrale: fenetre {settings.smoothing_window} points."
     if method.method_id == "local_bump":
         steps[6] = f"7. Ignorer les changements minuscules: seuil {settings.curvature_threshold:.3f} rad."
+    elif method.method_id == "tortuosity_density":
+        steps[2] = f"3. Normaliser le diametre du fond d'oeil a 1024 px, puis exclure les vaisseaux sous {settings.min_saved_vessel_length:.0f} px normalises."
+        steps[3] = f"4. Re-echantillonner tous les {settings.resample_step:.1f} px et lisser sur {settings.smoothing_window} points pour detecter les inflexions."
+        steps[4] = f"5. Ignorer les changements d'angle sous {settings.curvature_threshold:.3f} rad, puis diviser aux changements de signe restants."
     ax.text(0.08, 0.62, "\n".join(steps), va="top", fontsize=10)
-    ax.text(0.08, 0.34, HYBRID_SCORE_EXPLANATION, va="top", fontsize=9, wrap=True)
+    aggregation_explanation = HYBRID_SCORE_EXPLANATION if method.method_id == "local_bump" else LENGTH_WEIGHTED_SCORE_EXPLANATION
+    ax.text(0.08, 0.34, aggregation_explanation, va="top", fontsize=9, wrap=True)
     ax.text(0.08, 0.24, "\n".join(method.report_equations), va="top", fontsize=8.3)
     literature_lines = ["Litterature utilisee:"] + [f"- {item}" for item in LOCAL_BUMP_LITERATURE]
     ax.text(0.08, 0.06, "\n".join(literature_lines), va="bottom", fontsize=8.2)
@@ -822,8 +856,8 @@ def _add_all_systems_pdf_pages(pdf: PdfPages, all_systems_table: pd.DataFrame) -
         title_ax.text(
             0.0,
             0.55,
-            "Chaque vignette montre un vaisseau sauvegarde score, trie du plus au moins eleve selon la methode active. Le surlignage "
-            "jaune correspond exactement a la geometrie mesuree.",
+            "Chaque vignette montre un vaisseau retenu (memes regles que Clean_vessels: arteres classees de rang 1-3), "
+            "trie du plus au moins eleve selon la methode active. Le surlignage jaune correspond exactement a la geometrie mesuree.",
             va="top",
             fontsize=9,
             wrap=True,
@@ -924,9 +958,7 @@ def _load_skeleton_report_image(run_dir: Path, top_systems: pd.DataFrame) -> Ima
 
 
 def _top_system_rows(system_scores: pd.DataFrame, limit: int = 8) -> pd.DataFrame:
-    if system_scores.empty:
-        return pd.DataFrame()
-    eligible = system_scores[system_scores["eligible"]].copy()
+    eligible = _analysis_eligible_system_scores(system_scores)
     if eligible.empty:
         return pd.DataFrame()
     top = eligible.sort_values("primary_score", ascending=False).head(limit).copy()

@@ -298,6 +298,17 @@ def build_structured_vessel_data(
                     "raison_exclusion_analyse": exclusion_reason,
                     "methode_id": method.method_id,
                     "methode": score_row.get("scoring_method_label"),
+                    "tortuosity_density_score": _finite_float(score_row.get("tortuosity_density_score")),
+                    "sous_segments_courbure_constante": _finite_float(
+                        score_row.get("constant_curvature_segment_count")
+                    ),
+                    "nombre_inflexions": _finite_float(score_row.get("inflection_count")),
+                    "exces_arc_corde_tortuosity_density": _finite_float(
+                        score_row.get("tortuosity_density_excess")
+                    ),
+                    "geometrie_tortuosity_density_valide": bool(
+                        score_row.get("tortuosity_density_valid", False)
+                    ),
                     "poids_global": scoring_config.local_bump_settings.global_weight,
                     "poids_queue_haute": scoring_config.local_bump_settings.tail_weight,
                     "fraction_queue_haute": scoring_config.local_bump_settings.tail_length_fraction,

@@ -19,6 +19,7 @@ from tortuosite_score.vessels_detection.local_bump_score import (
     load_saved_run_branches,
     local_bump_metrics,
     tail_weighted_mean,
+    tortuosity_density_metrics,
     weighted_mean,
 )
 from tortuosite_score.vessels_detection.segments import (
@@ -28,7 +29,7 @@ from tortuosite_score.vessels_detection.segments import (
     segment_ref_sort_key,
 )
 
-ScoringMethodId = Literal["local_bump", "arc_chord", "curvature_squared"]
+ScoringMethodId = Literal["local_bump", "arc_chord", "curvature_squared", "tortuosity_density"]
 DEFAULT_SCORING_METHOD: ScoringMethodId = "local_bump"
 
 
@@ -126,11 +127,37 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
         ),
         eye_score_scale=1.0,
     ),
+    "tortuosity_density": ScoringMethodSpec(
+        method_id="tortuosity_density",
+        label="Tortuosity Density",
+        primary_score_label="Score Tortuosity Density",
+        eye_score_label="Score Tortuosity Density",
+        short_description="Combine la frequence des inflexions et l'allongement de chaque courbure.",
+        report_method_title="score Tortuosity Density sur vaisseaux sauvegardes",
+        report_steps=(
+            "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
+            "2. Reconstituer la ligne centrale ordonnee de chaque vaisseau sauvegarde.",
+            "3. Exclure les vaisseaux trop courts selon le seuil actif.",
+            "4. Re-echantillonner et lisser la ligne centrale pour detecter les inflexions significatives.",
+            "5. Diviser le vaisseau en sous-segments de courbure de signe constant.",
+            "6. Mesurer la longueur d'arc et la corde de chaque sous-segment sur la geometrie non lissee.",
+            "7. Appliquer la formule Tortuosity Density puis agreger l'oeil entier.",
+        ),
+        report_equations=(
+            "n = nombre de sous-segments de courbure de signe constant",
+            "tau_TD = ((n - 1) / L) x somme_i(L_i / C_i - 1)",
+            "S_oeil = somme(L_v x tau_TD,v) / somme(L_v)",
+        ),
+        eye_score_scale=1.0,
+    ),
 }
 
 
 def available_scoring_methods() -> list[ScoringMethodSpec]:
-    return [SCORING_METHOD_SPECS[method_id] for method_id in ["local_bump", "arc_chord", "curvature_squared"]]
+    return [
+        SCORING_METHOD_SPECS[method_id]
+        for method_id in ["local_bump", "arc_chord", "curvature_squared", "tortuosity_density"]
+    ]
 
 
 def scoring_method_spec(method_id: ScoringMethodId) -> ScoringMethodSpec:
@@ -156,12 +183,15 @@ def scoring_method_fixed_parameters(config: ScoringConfig | None = None) -> list
         ("Normalisation geometrie", f"diametre du fond d'oeil ramene a {REFERENCE_FUNDUS_DIAMETER:.0f} px"),
         ("Filtre petits vaisseaux", filter_label.replace(" px", " px normalises")),
     ]
-    if config.method_id == "local_bump":
+    if config.method_id in {"local_bump", "tortuosity_density"}:
         return [
             *shared_parameters,
             ("Pas de re-echantillonnage", f"{settings.resample_step:.1f} px"),
             ("Fenetre de lissage", f"{settings.smoothing_window} points"),
-            ("Seuil de courbure locale", f"{settings.curvature_threshold:.3f} rad"),
+            (
+                "Seuil de courbure locale" if config.method_id == "local_bump" else "Seuil d'inflexion",
+                f"{settings.curvature_threshold:.3f} rad",
+            ),
         ]
     if config.method_id == "curvature_squared":
         resampling_label = (
@@ -224,8 +254,10 @@ def score_saved_vessel(
     normalized_path_points = raw_path_points * scale
     raw_local_metrics = local_bump_metrics(raw_path_points, settings)
     raw_curvature_metrics = curvature_squared_metrics(raw_path_points, settings)
+    raw_density_metrics = tortuosity_density_metrics(raw_path_points, settings)
     local_metrics = local_bump_metrics(normalized_path_points, settings)
     curvature_metrics = curvature_squared_metrics(normalized_path_points, settings)
+    density_metrics = tortuosity_density_metrics(normalized_path_points, settings)
     raw_path_length = float(diagnostic.get("length", math.nan))
     raw_chord_length = float(diagnostic.get("chord", math.nan))
     path_length = raw_path_length * scale if math.isfinite(raw_path_length) else math.nan
@@ -237,6 +269,9 @@ def score_saved_vessel(
     elif config.method_id == "curvature_squared":
         primary_score = float(curvature_metrics["curvature_squared_score"])
         raw_primary_score = float(raw_curvature_metrics["curvature_squared_score"])
+    elif config.method_id == "tortuosity_density":
+        primary_score = float(density_metrics["tortuosity_density_score"])
+        raw_primary_score = float(raw_density_metrics["tortuosity_density_score"])
     else:
         primary_score = arc_chord_value
         raw_primary_score = arc_chord_value
@@ -246,7 +281,7 @@ def score_saved_vessel(
         and (
             math.isfinite(arc_chord_value)
             if config.method_id == "arc_chord"
-            else float(local_metrics["branch_length"]) > 0
+            else float(local_metrics["branch_length"]) > 0 and math.isfinite(primary_score)
         )
     )
     return {
@@ -283,6 +318,11 @@ def score_saved_vessel(
         "curvature_squared_integral": float(curvature_metrics["curvature_squared_integral"]),
         "mean_curvature": float(curvature_metrics["mean_curvature"]),
         "max_curvature": float(curvature_metrics["max_curvature"]),
+        "tortuosity_density_score": float(density_metrics["tortuosity_density_score"]),
+        "constant_curvature_segment_count": float(density_metrics["constant_curvature_segment_count"]),
+        "inflection_count": float(density_metrics["inflection_count"]),
+        "tortuosity_density_excess": float(density_metrics["tortuosity_density_excess"]),
+        "tortuosity_density_valid": bool(density_metrics["tortuosity_density_valid"]),
         "start_endpoint": vessel.get("start_endpoint"),
         "end_endpoint": vessel.get("end_endpoint"),
     }
@@ -482,10 +522,13 @@ def score_branch_fragments(
     for _, row in branches.iterrows():
         metrics = local_bump_metrics(row["path_points"], settings)
         curvature_metrics = curvature_squared_metrics(row["path_points"], settings)
+        density_metrics = tortuosity_density_metrics(row["path_points"], settings)
         if config.method_id == "local_bump":
             primary_score = metrics["branch_bump_score"]
         elif config.method_id == "curvature_squared":
             primary_score = curvature_metrics["curvature_squared_score"]
+        elif config.method_id == "tortuosity_density":
+            primary_score = density_metrics["tortuosity_density_score"]
         else:
             primary_score = metrics["arc_chord_tortuosity"]
         rows.append(
@@ -497,9 +540,11 @@ def score_branch_fragments(
                 "scoring_method": method.method_id,
                 "primary_score_label": method.primary_score_label,
                 "primary_score": primary_score,
-                "eligible": _is_branch_fragment_eligible(float(metrics["branch_length"]), config),
+                "eligible": _is_branch_fragment_eligible(float(metrics["branch_length"]), config)
+                and math.isfinite(float(primary_score)),
                 **metrics,
                 **curvature_metrics,
+                **density_metrics,
             }
         )
     return pd.DataFrame(rows)
@@ -527,6 +572,11 @@ def build_manual_vessels_export(
                 "curvature_squared_integral",
                 "mean_curvature",
                 "max_curvature",
+                "tortuosity_density_score",
+                "constant_curvature_segment_count",
+                "inflection_count",
+                "tortuosity_density_excess",
+                "tortuosity_density_valid",
             ]
         )
     state_vessels = review_state.get("vessels", {})
@@ -561,6 +611,11 @@ def build_manual_vessels_export(
                 "curvature_squared_integral": row["curvature_squared_integral"],
                 "mean_curvature": row["mean_curvature"],
                 "max_curvature": row["max_curvature"],
+                "tortuosity_density_score": row["tortuosity_density_score"],
+                "constant_curvature_segment_count": row["constant_curvature_segment_count"],
+                "inflection_count": row["inflection_count"],
+                "tortuosity_density_excess": row["tortuosity_density_excess"],
+                "tortuosity_density_valid": row["tortuosity_density_valid"],
             }
         )
     export_df = pd.DataFrame(rows)
@@ -586,6 +641,7 @@ def build_review_scores_table(
                 "Score principal": row["primary_score"],
                 "Arc/chord diagnostic": row["arc_chord_diagnostic"],
                 "Courbure^2 diagnostic": row["curvature_squared_score"],
+                "Tortuosity Density diagnostic": row["tortuosity_density_score"],
                 "Longueur du trajet": row["path_length"],
                 "Corde": row["chord_length"],
                 "Segments modele": row["model_segment_count"],
@@ -608,6 +664,9 @@ def top_contributing_vessels(vessel_scores: pd.DataFrame, limit: int = 8) -> lis
         "bridge_count",
         "oscillation_count",
         "curvature_squared_score",
+        "tortuosity_density_score",
+        "constant_curvature_segment_count",
+        "inflection_count",
     ]
     available = [column for column in columns if column in vessel_scores.columns]
     rows = vessel_scores.sort_values("primary_score", ascending=False).head(limit)

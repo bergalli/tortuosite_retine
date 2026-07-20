@@ -19,6 +19,7 @@ from tortuosite_score.vessels_detection.local_bump_score import (
     score_saved_vessels,
     score_root_to_leaf_systems,
     summarize_eye_score,
+    tortuosity_density_metrics,
 )
 from tortuosite_score.vessels_detection.scoring import (
     available_scoring_methods,
@@ -105,6 +106,51 @@ class LocalBumpMetricTests(unittest.TestCase):
 
         self.assertEqual(raw_score, explicit_raw_score)
         self.assertNotEqual(raw_score["curvature_squared_score"], resampled_score["curvature_squared_score"])
+
+    def test_tortuosity_density_is_zero_without_an_inflection(self) -> None:
+        straight = tortuosity_density_metrics([[0, 0], [10, 0], [20, 0]])
+        theta = np.linspace(0.0, math.pi / 2.0, 100)
+        arc = tortuosity_density_metrics(np.column_stack([50.0 * np.cos(theta), 50.0 * np.sin(theta)]))
+
+        for metrics in (straight, arc):
+            self.assertTrue(bool(metrics["tortuosity_density_valid"]))
+            self.assertEqual(metrics["constant_curvature_segment_count"], 1.0)
+            self.assertEqual(metrics["inflection_count"], 0.0)
+            self.assertAlmostEqual(float(metrics["tortuosity_density_score"]), 0.0)
+
+    def test_tortuosity_density_matches_hand_calculated_two_bend_curve(self) -> None:
+        points = [[0, 0], [1, 1], [2, 0], [3, -1], [4, 0]]
+        settings = LocalBumpSettings(resample_step=math.sqrt(2.0), smoothing_window=1, curvature_threshold=0.01)
+
+        metrics = tortuosity_density_metrics(points, settings)
+        expected = (math.sqrt(2.0) - 1.0) / (2.0 * math.sqrt(2.0))
+
+        self.assertTrue(bool(metrics["tortuosity_density_valid"]))
+        self.assertEqual(metrics["constant_curvature_segment_count"], 2.0)
+        self.assertEqual(metrics["inflection_count"], 1.0)
+        self.assertAlmostEqual(float(metrics["tortuosity_density_excess"]), 2.0 * (math.sqrt(2.0) - 1.0))
+        self.assertAlmostEqual(float(metrics["tortuosity_density_score"]), expected)
+
+    def test_tortuosity_density_ignores_subthreshold_sign_flips_and_duplicates(self) -> None:
+        points = [[0, 0], [1, 0.005], [1, 0.005], [2, -0.005], [3, 0.005], [4, 0]]
+        settings = LocalBumpSettings(resample_step=1.0, smoothing_window=1, curvature_threshold=0.035)
+
+        metrics = tortuosity_density_metrics(points, settings)
+
+        self.assertTrue(bool(metrics["tortuosity_density_valid"]))
+        self.assertEqual(metrics["constant_curvature_segment_count"], 1.0)
+        self.assertAlmostEqual(float(metrics["tortuosity_density_score"]), 0.0)
+
+    def test_tortuosity_density_rejects_zero_chord_geometry(self) -> None:
+        closed_curve = [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]
+
+        metrics = tortuosity_density_metrics(
+            closed_curve,
+            LocalBumpSettings(resample_step=1.0, smoothing_window=1, curvature_threshold=0.01),
+        )
+
+        self.assertFalse(bool(metrics["tortuosity_density_valid"]))
+        self.assertTrue(math.isnan(float(metrics["tortuosity_density_score"])))
 
     def test_eye_summary_uses_tail_component(self) -> None:
         systems = pd.DataFrame(
@@ -284,7 +330,7 @@ class CentralScoringServiceTests(unittest.TestCase):
     def test_method_registry_contains_arc_chord_and_local_bump(self) -> None:
         methods = {method.method_id for method in available_scoring_methods()}
 
-        self.assertEqual(methods, {"local_bump", "arc_chord", "curvature_squared"})
+        self.assertEqual(methods, {"local_bump", "arc_chord", "curvature_squared", "tortuosity_density"})
 
     def test_same_saved_vessel_can_be_scored_by_both_methods(self) -> None:
         points = [[0, 0], [20, 6], [40, -6], [60, 6], [80, 0]]
@@ -301,15 +347,21 @@ class CentralScoringServiceTests(unittest.TestCase):
         arc_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("arc_chord"))
         bump_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("local_bump"))
         curvature_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("curvature_squared"))
+        density_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("tortuosity_density"))
 
         self.assertEqual(arc_score["scoring_method"], "arc_chord")
         self.assertEqual(bump_score["scoring_method"], "local_bump")
         self.assertEqual(curvature_score["scoring_method"], "curvature_squared")
+        self.assertEqual(density_score["scoring_method"], "tortuosity_density")
         self.assertAlmostEqual(float(arc_score["arc_chord_diagnostic"]), float(arc_score["primary_score"]))
         self.assertGreater(float(bump_score["local_bump_score"]), 0.0)
         self.assertAlmostEqual(
             float(curvature_score["curvature_squared_score"]),
             float(curvature_score["primary_score"]),
+        )
+        self.assertAlmostEqual(
+            float(density_score["tortuosity_density_score"]),
+            float(density_score["primary_score"]),
         )
 
     def test_coordinate_normalization_makes_scaled_geometry_comparable(self) -> None:
@@ -345,6 +397,54 @@ class CentralScoringServiceTests(unittest.TestCase):
             float(normalized_score["primary_score"]),
             places=6,
         )
+
+    def test_tortuosity_density_uses_normalized_geometry_and_inverse_length_units(self) -> None:
+        def score_for(points: list[list[float]], scale: float) -> dict[str, object]:
+            segment = VesselSegment.from_manual_points(1, points)
+            segment_map = build_segment_map(pd.DataFrame(), {"1": segment.to_manual_payload()})
+            vessel = {
+                "category": "artere",
+                "segment_refs": [segment.ref],
+                "synthetic_links": [],
+                "start_endpoint": {"kind": "geometry_point", "point": points[0], "segment_ref": segment.ref},
+                "end_endpoint": {"kind": "geometry_point", "point": points[-1], "segment_ref": segment.ref},
+            }
+            return score_saved_vessel(
+                segment_map,
+                "v1",
+                vessel,
+                config=scoring_config("tortuosity_density"),
+                coordinate_scale=scale,
+            )
+
+        base = [[0, 0], [40, 40], [80, 0], [120, -40], [160, 0]]
+        enlarged = [[4 * x, 4 * y] for x, y in base]
+        base_score = score_for(base, 1.0)
+        normalized_score = score_for(enlarged, 0.25)
+
+        self.assertAlmostEqual(float(base_score["primary_score"]), float(normalized_score["primary_score"]), places=10)
+        self.assertAlmostEqual(
+            float(normalized_score["raw_primary_score"]),
+            float(normalized_score["primary_score"]) / 4.0,
+            places=6,
+        )
+
+    def test_tortuosity_density_eye_summary_is_length_weighted_without_tail_or_scale(self) -> None:
+        vessel_scores = pd.DataFrame(
+            {
+                "eligible": [True, True],
+                "primary_score": [1.0, 3.0],
+                "vessel_length": [10.0, 30.0],
+                "arc_chord_diagnostic": [1.0, 1.2],
+                "category": ["artere", "veine"],
+            }
+        )
+
+        summary = summarize_saved_eye_score(vessel_scores, scoring_config("tortuosity_density"))
+
+        self.assertAlmostEqual(float(summary["eye_tortuosity_score"]), 2.5)
+        self.assertAlmostEqual(float(summary["all_vessels_score"]), 2.5)
+        self.assertTrue(math.isnan(float(summary["all_vessels_tail_score"])))
 
     def test_short_vessel_filter_applies_to_all_scoring_methods_by_default(self) -> None:
         points = [[0, 0], [20, 6], [40, -6], [60, 6], [80, 0]]
@@ -449,6 +549,7 @@ class CentralScoringServiceTests(unittest.TestCase):
         local_bump_parameters = dict(scoring_method_fixed_parameters(scoring_config("local_bump")))
         curvature_parameters = dict(scoring_method_fixed_parameters(scoring_config("curvature_squared")))
         arc_chord_parameters = dict(scoring_method_fixed_parameters(scoring_config("arc_chord")))
+        density_parameters = dict(scoring_method_fixed_parameters(scoring_config("tortuosity_density")))
 
         self.assertIn("Seuil de courbure locale", local_bump_parameters)
         self.assertIn("Pas de re-echantillonnage", local_bump_parameters)
@@ -465,6 +566,16 @@ class CentralScoringServiceTests(unittest.TestCase):
             {
                 "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
                 "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
+            },
+        )
+        self.assertEqual(
+            density_parameters,
+            {
+                "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
+                "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
+                "Pas de re-echantillonnage": "4.0 px",
+                "Fenetre de lissage": "5 points",
+                "Seuil d'inflexion": "0.035 rad",
             },
         )
 

@@ -36,7 +36,7 @@ So the final method does **not** score the whole skeleton directly. The whole-sk
 - The Streamlit `Results` tab uses the active saved-vessel scoring method.
 - The PDF report uses the same active saved-vessel scoring method.
 - The CLI `tortuosite_score.vessels_detection.local_bump_score` accepts `--method` and uses the same centralized scoring service.
-- `Arc/chord` and `Courbure quadratique` can also be selected as primary methods; `Arc/chord` remains available as a diagnostic column.
+- `Arc/chord`, `Courbure quadratique`, and `Tortuosity Density` can also be selected as primary methods; `Arc/chord` remains available as a diagnostic column.
 
 ## Scoring method
 
@@ -156,12 +156,25 @@ where \(s\) is arc length and the local curvature is estimated from the resample
 \frac{|x'(s)y''(s)-y'(s)x''(s)|}{(x'(s)^2+y'(s)^2)^{3/2}}
 \]
 
-This score is displayed and aggregated as the raw mathematical value. The eye-level aggregation uses the same eligible saved vessels, length-weighted mean, and upper-tail component as the local-bump method.
+This score is displayed and aggregated as the raw mathematical value. The eye-level aggregation is the length-weighted mean across eligible saved vessels.
+
+### Optional Tortuosity Density score
+
+The app also implements the Grisan Tortuosity Density formula supplied for this project. The normalized vessel is divided into (n) subsegments whose curvature has constant sign:
+
+\[
+\tau_{TD}=\frac{n-1}{L}\sum_{i=1}^{n}\left(\frac{L_i}{C_i}-1\right)
+\]
+
+where (L) is the total vessel length, (L_i) is the arc length of subsegment (i), and (C_i) is its chord. The centerline is resampled every 4 px and smoothed over 5 points to locate stable inflections; angle changes below 0.035 rad are ignored. Arc and chord measurements themselves use the normalized, unsmoothed geometry. A vessel with no significant change of curvature sign has (n=1) and therefore scores zero.
+
+The eye-level Tortuosity Density score is the length-weighted mean across eligible saved vessels. It has no upper-tail component and no display multiplier.
 
 The current report score is project-specific and cohort-relative:
 
 - `Score local-bump`: final saved-vessel local-bump eye score.
 - `Score courbure^2`: optional raw curvature-squared eye score when that method is active.
+- `Score Tortuosity Density`: optional raw Tortuosity Density eye score when that method is active.
 - `Score moyen`: length-weighted mean saved-vessel local-bump burden.
 - `Queue superieure`: upper-tail saved-vessel burden.
 - `Score comparatif`: cohort-normalized `Score local-bump`.

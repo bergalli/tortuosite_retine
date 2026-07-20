@@ -146,6 +146,71 @@ def curvature_squared_metrics(
     }
 
 
+def tortuosity_density_metrics(
+    points: list[list[float]] | np.ndarray,
+    settings: LocalBumpSettings | None = None,
+) -> dict[str, float | bool]:
+    """Compute Grisan tortuosity density on one ordered vessel centerline.
+
+    Resampling and smoothing are used only to locate stable curvature-sign
+    changes. Arc lengths and chords in the formula are measured on the input
+    geometry so that preprocessing does not alter the measured bends.
+    """
+    settings = settings or LocalBumpSettings()
+    path = _prepare_path(points)
+    if len(path) < 2:
+        return _empty_tortuosity_density_metrics(valid=False)
+
+    cumulative = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))])
+    total_length = float(cumulative[-1])
+    if total_length <= 0:
+        return _empty_tortuosity_density_metrics(valid=False)
+
+    resampled = resample_polyline(path, settings.resample_step)
+    sample_distances = _resample_distances(total_length, settings.resample_step)
+    if len(resampled) != len(sample_distances):
+        return _empty_tortuosity_density_metrics(valid=False)
+    smoothed = smooth_polyline(resampled, settings.smoothing_window)
+    angle_change = local_angle_change(smoothed)
+    if len(angle_change) != max(len(resampled) - 2, 0):
+        return _empty_tortuosity_density_metrics(valid=False)
+    meaningful = np.where(np.abs(angle_change) >= settings.curvature_threshold, angle_change, 0.0)
+
+    nonzero_indices = np.flatnonzero(meaningful)
+    boundaries: list[float] = []
+    for previous, current in zip(nonzero_indices[:-1], nonzero_indices[1:]):
+        if np.sign(meaningful[previous]) == np.sign(meaningful[current]):
+            continue
+        previous_distance = float(sample_distances[int(previous) + 1])
+        current_distance = float(sample_distances[int(current) + 1])
+        boundaries.append((previous_distance + current_distance) / 2.0)
+
+    split_distances = np.asarray([0.0, *boundaries, total_length], dtype=float)
+    segment_count = len(split_distances) - 1
+    excess_sum = 0.0
+    for start_distance, end_distance in zip(split_distances[:-1], split_distances[1:]):
+        arc_length = float(end_distance - start_distance)
+        start_point = _point_at_arc_distance(path, cumulative, float(start_distance))
+        end_point = _point_at_arc_distance(path, cumulative, float(end_distance))
+        chord_length = float(np.linalg.norm(end_point - start_point))
+        if arc_length <= 0 or chord_length <= 1e-9:
+            return _empty_tortuosity_density_metrics(
+                segment_count=segment_count,
+                inflection_count=len(boundaries),
+                valid=False,
+            )
+        excess_sum += arc_length / chord_length - 1.0
+
+    score = float((segment_count - 1) / total_length * excess_sum)
+    return {
+        "tortuosity_density_score": score,
+        "constant_curvature_segment_count": float(segment_count),
+        "inflection_count": float(len(boundaries)),
+        "tortuosity_density_excess": float(excess_sum),
+        "tortuosity_density_valid": True,
+    }
+
+
 def score_run(
     run_dir: str | Path,
     settings: LocalBumpSettings | None = None,
@@ -836,6 +901,26 @@ def resample_polyline(points: np.ndarray, step: float) -> np.ndarray:
     return np.column_stack([x, y])
 
 
+def _resample_distances(total_length: float, step: float) -> np.ndarray:
+    step = max(float(step), 1.0)
+    sample_distances = np.arange(0.0, float(total_length), step)
+    if sample_distances.size == 0 or sample_distances[-1] < total_length:
+        sample_distances = np.append(sample_distances, float(total_length))
+    return sample_distances
+
+
+def _point_at_arc_distance(points: np.ndarray, cumulative: np.ndarray, distance: float) -> np.ndarray:
+    distance = float(np.clip(distance, 0.0, cumulative[-1]))
+    index = int(np.searchsorted(cumulative, distance, side="right") - 1)
+    if index >= len(points) - 1:
+        return points[-1].copy()
+    segment_length = float(cumulative[index + 1] - cumulative[index])
+    if segment_length <= 0:
+        return points[index].copy()
+    fraction = (distance - float(cumulative[index])) / segment_length
+    return points[index] + fraction * (points[index + 1] - points[index])
+
+
 def smooth_polyline(points: np.ndarray, window: int) -> np.ndarray:
     if len(points) < 3:
         return points.copy()
@@ -1002,6 +1087,20 @@ def _empty_curvature_squared_metrics(branch_length: float = 0.0, chord_length: f
     }
 
 
+def _empty_tortuosity_density_metrics(
+    segment_count: int = 0,
+    inflection_count: int = 0,
+    valid: bool = False,
+) -> dict[str, float | bool]:
+    return {
+        "tortuosity_density_score": math.nan,
+        "constant_curvature_segment_count": float(segment_count),
+        "inflection_count": float(inflection_count),
+        "tortuosity_density_excess": math.nan,
+        "tortuosity_density_valid": bool(valid),
+    }
+
+
 def _category_score(branches: pd.DataFrame, category: str) -> float:
     subset = branches[branches["category"] == category]
     if subset.empty:
@@ -1076,7 +1175,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--systems-output", "--vessels-output", dest="systems_output", default="demo/local_bump_vessel_scores.csv")
     parser.add_argument("--branches-output", default="demo/local_bump_branch_scores.csv")
     parser.add_argument("--include-all-runs", action="store_true")
-    parser.add_argument("--method", choices=["local_bump", "arc_chord", "curvature_squared"], default="local_bump")
+    parser.add_argument(
+        "--method",
+        choices=["local_bump", "arc_chord", "curvature_squared", "tortuosity_density"],
+        default="local_bump",
+    )
     parser.add_argument("--min-branch-length", type=float, default=DEFAULT_MIN_BRANCH_LENGTH)
     parser.add_argument("--min-system-length", type=float, default=DEFAULT_MIN_SYSTEM_LENGTH)
     parser.add_argument("--resample-step", type=float, default=DEFAULT_RESAMPLE_STEP)

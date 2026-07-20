@@ -13,6 +13,7 @@ from tortuosite_score.app.results_page import (
     _pvalue_cell_color,
     _single_line_cell_text,
     _stats_table_font_size,
+    _top_system_rows,
     _top_system_table,
     build_adjusted_pvalue_matrix,
     build_pvalue_matrix,
@@ -246,7 +247,7 @@ class ResultsPageTests(unittest.TestCase):
         top_systems = pd.DataFrame(
             {
                 "highlight_label": ["V1"],
-                "vessel_name": ["temporal"],
+                "vessel_name": ["1°A-sup"],
                 "category": ["artere"],
                 "primary_score": [2.3],
                 "vessel_length": [120.0],
@@ -263,6 +264,22 @@ class ResultsPageTests(unittest.TestCase):
             ["Label", "Vaisseau", "Categorie", "Score vaisseau", "Longueur", "Segments"],
         )
 
+    def test_top_system_rows_use_clean_vessels_naming_rules(self) -> None:
+        system_scores = pd.DataFrame(
+            {
+                "vessel_name": ["1°A-sup", "VEINE TEMPORALE INF", "unknown"],
+                "category": ["artere", "artere", "artere"],
+                "vessel_length": [50.0, 150.0, 150.0],
+                "eligible": [False, True, True],
+                "primary_score": [1.0, 9.9, 8.8],
+            }
+        )
+
+        top = _top_system_rows(system_scores)
+
+        self.assertEqual(top["vessel_name"].tolist(), ["1°A-sup"])
+        self.assertEqual(top["highlight_label"].tolist(), ["V1"])
+
     def test_all_systems_table_hides_arc_chord_diagnostic(self) -> None:
         scored_runs = [
             (
@@ -271,7 +288,7 @@ class ResultsPageTests(unittest.TestCase):
                 pd.DataFrame(
                     {
                         "eligible": [True],
-                        "vessel_name": ["temporal"],
+                        "vessel_name": ["1°A-sup"],
                         "category": ["artere"],
                         "scoring_method_label": ["Local-bump"],
                         "primary_score": [2.3],
@@ -290,6 +307,38 @@ class ResultsPageTests(unittest.TestCase):
         display = _build_all_systems_table(scored_runs)
 
         self.assertNotIn("Arc/chord diagnostic", display.columns.tolist())
+
+    def test_all_systems_table_uses_clean_vessels_naming_rules(self) -> None:
+        scored_runs = [
+            (
+                _fake_run_dir("eye_a"),
+                {"eye_number": "OD"},
+                pd.DataFrame(
+                    {
+                        "vessel_name": ["1°A-sup", "VEINE TEMPORALE INF", "unknown"],
+                        "category": ["artere", "artere", "artere"],
+                        "vessel_length": [50.0, 150.0, 150.0],
+                        "eligible": [False, True, True],
+                        "scoring_method_label": ["Local-bump", "Local-bump", "Local-bump"],
+                        "primary_score": [1.0, 9.9, 8.8],
+                        "segment_count": [2, 3, 4],
+                        "bridge_count": [0, 1, 1],
+                        "curvature_squared_score": [0.1, 0.2, 0.3],
+                        "oscillation_count": [1, 2, 3],
+                        "path_points": [
+                            [[0.0, 0.0], [1.0, 1.0]],
+                            [[0.0, 0.0], [2.0, 2.0]],
+                            [[0.0, 0.0], [3.0, 3.0]],
+                        ],
+                    }
+                ),
+            )
+        ]
+
+        display = _build_all_systems_table(scored_runs)
+
+        self.assertEqual(display["Vaisseau"].tolist(), ["1°A-sup"])
+        self.assertEqual(display["Rang"].tolist(), [1])
 
     def test_local_bump_summary_table_sorts_by_weighted_mean(self) -> None:
         scored_runs = [
