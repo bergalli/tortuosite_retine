@@ -36,6 +36,7 @@ DEFAULT_MIN_SYSTEM_LENGTH = 250.0
 DEFAULT_BRIDGE_TOLERANCE = 18.0
 DEFAULT_BRIDGE_DIRECTION_COSINE = 0.35
 DEFAULT_MIN_SAVED_VESSEL_LENGTH = 100.0
+DEFAULT_RDP_EPSILON = 3.0
 DISPLAY_SCALE = 1000.0
 REFERENCE_FUNDUS_DIAMETER = 1024.0
 
@@ -57,6 +58,7 @@ class LocalBumpSettings:
     min_saved_vessel_length: float = DEFAULT_MIN_SAVED_VESSEL_LENGTH
     filter_short_vessels: bool = True
     resample_curvature_squared: bool = True
+    rdp_epsilon: float = DEFAULT_RDP_EPSILON
 
 
 def local_bump_metrics(
@@ -276,6 +278,50 @@ def tortuosity_density_metrics(
         "inflection_count": float(len(boundaries)),
         "tortuosity_density_excess": float(excess_sum),
         "tortuosity_density_valid": True,
+    }
+
+
+def external_angle_sum_metrics(
+    points: list[list[float]] | np.ndarray,
+    settings: LocalBumpSettings | None = None,
+) -> dict[str, float]:
+    """Sum of external (turning) angles at Ramer-Douglas-Peucker bend points.
+
+    Implements the formula ``T = sum_i theta_i``, where ``theta_i`` is the
+    external angle (in degrees) at the i-th bend point of the polyline
+    obtained by simplifying the vessel centerline with the Ramer-Douglas-
+    Peucker algorithm. The continuous curvature kappa(s) is never computed;
+    this only counts turns and their magnitude.
+    """
+    settings = settings or LocalBumpSettings()
+    path = _prepare_path(points)
+    if len(path) < 2:
+        return _empty_external_angle_sum_metrics()
+
+    branch_length = polyline_length(path)
+    chord_length = float(np.linalg.norm(path[-1] - path[0]))
+    if branch_length <= 0:
+        return _empty_external_angle_sum_metrics(branch_length=branch_length, chord_length=chord_length)
+
+    simplified = rdp_simplify(path, settings.rdp_epsilon)
+    if len(simplified) < 3:
+        return _empty_external_angle_sum_metrics(branch_length=branch_length, chord_length=chord_length)
+
+    turn_angles = local_angle_change(simplified)
+    bend_point_count = int(turn_angles.size)
+    if bend_point_count == 0:
+        return _empty_external_angle_sum_metrics(branch_length=branch_length, chord_length=chord_length)
+
+    external_angles_deg = np.degrees(np.abs(turn_angles))
+    total_angle_sum = float(np.sum(external_angles_deg))
+    mean_angle = float(np.mean(external_angles_deg))
+    return {
+        "external_angle_sum_branch_length": float(branch_length),
+        "external_angle_sum_chord_length": chord_length,
+        "external_angle_sum_bend_point_count": float(bend_point_count),
+        "external_angle_sum_simplified_point_count": float(len(simplified)),
+        "external_angle_sum_mean_angle_deg": mean_angle,
+        "external_angle_sum_score": total_angle_sum,
     }
 
 
@@ -969,6 +1015,48 @@ def resample_polyline(points: np.ndarray, step: float) -> np.ndarray:
     return np.column_stack([x, y])
 
 
+def rdp_simplify(points: np.ndarray, epsilon: float) -> np.ndarray:
+    """Simplify a polyline with the Ramer-Douglas-Peucker algorithm.
+
+    Recursively (here iteratively, via an explicit stack) keeps the point
+    with the largest perpendicular distance from the chord of its segment
+    whenever that distance exceeds ``epsilon``, discarding the rest.
+    """
+    if len(points) < 3 or epsilon <= 0:
+        return points.copy()
+    keep = np.zeros(len(points), dtype=bool)
+    keep[0] = True
+    keep[-1] = True
+    stack: list[tuple[int, int]] = [(0, len(points) - 1)]
+    while stack:
+        start, end = stack.pop()
+        if end <= start + 1:
+            continue
+        distances = _perpendicular_distances(points[start + 1 : end], points[start], points[end])
+        if distances.size == 0:
+            continue
+        max_index = int(np.argmax(distances))
+        max_distance = float(distances[max_index])
+        if max_distance > epsilon:
+            split = start + 1 + max_index
+            keep[split] = True
+            stack.append((start, split))
+            stack.append((split, end))
+    return points[keep]
+
+
+def _perpendicular_distances(points: np.ndarray, line_start: np.ndarray, line_end: np.ndarray) -> np.ndarray:
+    line_vector = line_end - line_start
+    line_length = float(np.linalg.norm(line_vector))
+    if line_length <= 1e-9:
+        return np.linalg.norm(points - line_start, axis=1)
+    line_unit = line_vector / line_length
+    diffs = points - line_start
+    projections = diffs @ line_unit
+    projected_points = line_start + np.outer(projections, line_unit)
+    return np.linalg.norm(points - projected_points, axis=1)
+
+
 def _resample_distances(total_length: float, step: float) -> np.ndarray:
     step = max(float(step), 1.0)
     sample_distances = np.arange(0.0, float(total_length), step)
@@ -1256,6 +1344,17 @@ def _empty_tortuosity_density_metrics(
     }
 
 
+def _empty_external_angle_sum_metrics(branch_length: float = 0.0, chord_length: float = 0.0) -> dict[str, float]:
+    return {
+        "external_angle_sum_branch_length": float(branch_length),
+        "external_angle_sum_chord_length": float(chord_length),
+        "external_angle_sum_bend_point_count": 0.0,
+        "external_angle_sum_simplified_point_count": 0.0,
+        "external_angle_sum_mean_angle_deg": 0.0,
+        "external_angle_sum_score": 0.0,
+    }
+
+
 def _category_score(branches: pd.DataFrame, category: str) -> float:
     subset = branches[branches["category"] == category]
     if subset.empty:
@@ -1332,7 +1431,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-all-runs", action="store_true")
     parser.add_argument(
         "--method",
-        choices=["local_bump", "local_bump_v2", "arc_chord", "curvature_squared", "tortuosity_density"],
+        choices=[
+            "local_bump",
+            "local_bump_v2",
+            "arc_chord",
+            "curvature_squared",
+            "tortuosity_density",
+            "external_angle_sum",
+        ],
         default="local_bump",
     )
     parser.add_argument("--min-branch-length", type=float, default=DEFAULT_MIN_BRANCH_LENGTH)

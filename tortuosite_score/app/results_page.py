@@ -90,6 +90,14 @@ TORTUOSITY_DENSITY_METHOD_EXPLANATION = (
     "decoupent le vaisseau en sous-segments. Les longueurs d'arc et les cordes utilisees par la formule sont ensuite "
     "mesurees sur la geometrie normalisee non lissee. Une courbe de convexite constante a un score nul."
 )
+EXTERNAL_ANGLE_SUM_METHOD_EXPLANATION = (
+    "Le score actuel est calcule uniquement sur les vaisseaux sauvegardes. La ligne centrale normalisee est "
+    "simplifiee en segments droits avec l'algorithme de Ramer-Douglas-Peucker, ce qui produit une liste de points "
+    "de flexion sans jamais estimer une courbure continue kappa(s). L'angle externe theta_i est calcule a chaque "
+    "point de flexion conserve, puis tous les angles externes sont sommes pour obtenir T = somme(theta_i), en "
+    "degres. La metrique compte donc le nombre de virages et leur amplitude, sans dependre directement de la "
+    "longueur du vaisseau ni du rayon de courbure."
+)
 HYBRID_SCORE_EXPLANATION = (
     "Le score final de l'oeil combine une moyenne des vaisseaux sauvegardes ponderee par la longueur et une composante "
     "de queue superieure pour que quelques vaisseaux tres bossues ne soient pas dilues par de nombreux vaisseaux "
@@ -135,6 +143,11 @@ MODEL_DESCRIPTION_BY_METHOD = {
         "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
         "Il re-echantillonne et lisse la ligne centrale pour detecter les inflexions significatives, sans ajouter de parametre propre a cette methode.",
         "Il mesure ensuite les arcs et les cordes sur la geometrie normalisee non lissee et applique tau_TD = ((n - 1) / L) x somme(L_i / C_i - 1).",
+    ],
+    "external_angle_sum": [
+        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
+        "Il simplifie la ligne centrale normalisee avec l'algorithme de Ramer-Douglas-Peucker pour obtenir des points de flexion.",
+        "Il calcule ensuite l'angle externe theta_i a chaque point de flexion conserve et applique T = somme(theta_i), sans jamais estimer une courbure continue.",
     ],
     "local_bump_v2": [
         "Le modele experimental analyse les memes vaisseaux sauvegardes que le local-bump v1.",
@@ -764,6 +777,7 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
         "arc_chord": ARC_CHORD_METHOD_EXPLANATION,
         "curvature_squared": CURVATURE_SQUARED_METHOD_EXPLANATION,
         "tortuosity_density": TORTUOSITY_DENSITY_METHOD_EXPLANATION,
+        "external_angle_sum": EXTERNAL_ANGLE_SUM_METHOD_EXPLANATION,
     }.get(method.method_id, LOCAL_BUMP_METHOD_EXPLANATION)
     ax.text(0.08, 0.88, explanation, va="top", fontsize=10, wrap=True)
     steps = list(method.report_steps)
@@ -782,6 +796,10 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
         steps[2] = f"3. Normaliser le diametre du fond d'oeil a 1024 px, puis exclure les vaisseaux sous {settings.min_saved_vessel_length:.0f} px normalises."
         steps[3] = f"4. Re-echantillonner tous les {settings.resample_step:.1f} px et lisser sur {settings.smoothing_window} points pour detecter les inflexions."
         steps[4] = f"5. Ignorer les changements d'angle sous {settings.curvature_threshold:.3f} rad, puis diviser aux changements de signe restants."
+    elif method.method_id == "external_angle_sum":
+        steps[2] = f"3. Normaliser le diametre du fond d'oeil a 1024 px, puis exclure les vaisseaux sous {settings.min_saved_vessel_length:.0f} px normalises."
+        steps[3] = f"4. Simplifier la ligne centrale avec Ramer-Douglas-Peucker (tolerance {settings.rdp_epsilon:.1f} px normalises)."
+        steps[4] = "5. Calculer l'angle externe (en degres) a chaque point de flexion conserve."
     ax.text(0.08, 0.62, "\n".join(steps), va="top", fontsize=10)
     aggregation_explanation = HYBRID_SCORE_EXPLANATION if method.method_id == "local_bump" else LENGTH_WEIGHTED_SCORE_EXPLANATION
     ax.text(0.08, 0.34, aggregation_explanation, va="top", fontsize=9, wrap=True)

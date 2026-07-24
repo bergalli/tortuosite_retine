@@ -16,6 +16,7 @@ from tortuosite_score.vessels_detection.local_bump_score import (
     LocalBumpSettings,
     add_comparative_hybrid_score,
     curvature_squared_metrics,
+    external_angle_sum_metrics,
     load_saved_run_branches,
     local_bump_metrics,
     local_bump_v2_metrics,
@@ -36,6 +37,7 @@ ScoringMethodId = Literal[
     "arc_chord",
     "curvature_squared",
     "tortuosity_density",
+    "external_angle_sum",
 ]
 DEFAULT_SCORING_METHOD: ScoringMethodId = "local_bump"
 
@@ -181,13 +183,44 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
         ),
         eye_score_scale=1.0,
     ),
+    "external_angle_sum": ScoringMethodSpec(
+        method_id="external_angle_sum",
+        label="Somme des angles externes (RDP)",
+        primary_score_label="Score somme des angles externes",
+        eye_score_label="Score somme des angles externes",
+        short_description="Somme les angles externes aux points de flexion detectes par simplification Douglas-Peucker du trace du vaisseau.",
+        report_method_title="score de somme des angles externes (Ramer-Douglas-Peucker) sur vaisseaux sauvegardes",
+        report_steps=(
+            "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
+            "2. Reconstituer la ligne centrale ordonnee de chaque vaisseau sauvegarde.",
+            "3. Exclure les vaisseaux trop courts selon le seuil actif.",
+            "4. Simplifier la ligne centrale en segments droits avec l'algorithme de Ramer-Douglas-Peucker.",
+            "5. Calculer l'angle externe theta_i a chaque point de flexion conserve.",
+            "6. Sommer tous les angles externes pour obtenir le score du vaisseau.",
+            "7. Agreger l'oeil entier par moyenne ponderee par la longueur.",
+        ),
+        report_equations=(
+            "RDP(epsilon) -> points de flexion p_1, ..., p_n",
+            "theta_i = angle externe (deg) au point de flexion i",
+            "T_v = somme_i theta_i",
+            "S_oeil = somme(L_v x T_v) / somme(L_v)",
+        ),
+        eye_score_scale=1.0,
+    ),
 }
 
 
 def available_scoring_methods() -> list[ScoringMethodSpec]:
     return [
         SCORING_METHOD_SPECS[method_id]
-        for method_id in ["local_bump", "local_bump_v2", "arc_chord", "curvature_squared", "tortuosity_density"]
+        for method_id in [
+            "local_bump",
+            "local_bump_v2",
+            "arc_chord",
+            "curvature_squared",
+            "tortuosity_density",
+            "external_angle_sum",
+        ]
     ]
 
 
@@ -242,6 +275,11 @@ def scoring_method_fixed_parameters(config: ScoringConfig | None = None) -> list
             *shared_parameters,
             ("Pretraitement re-echantillonnage", resampling_label),
         ]
+    if config.method_id == "external_angle_sum":
+        return [
+            *shared_parameters,
+            ("Tolerance de simplification RDP", f"{settings.rdp_epsilon:.1f} px normalises"),
+        ]
     return shared_parameters
 
 
@@ -295,10 +333,12 @@ def score_saved_vessel(
     raw_local_v2_metrics = local_bump_v2_metrics(raw_path_points, settings)
     raw_curvature_metrics = curvature_squared_metrics(raw_path_points, settings)
     raw_density_metrics = tortuosity_density_metrics(raw_path_points, settings)
+    raw_angle_sum_metrics = external_angle_sum_metrics(raw_path_points, settings)
     local_metrics = local_bump_metrics(normalized_path_points, settings)
     local_v2_metrics = local_bump_v2_metrics(normalized_path_points, settings)
     curvature_metrics = curvature_squared_metrics(normalized_path_points, settings)
     density_metrics = tortuosity_density_metrics(normalized_path_points, settings)
+    angle_sum_metrics = external_angle_sum_metrics(normalized_path_points, settings)
     raw_path_length = float(diagnostic.get("length", math.nan))
     raw_chord_length = float(diagnostic.get("chord", math.nan))
     path_length = raw_path_length * scale if math.isfinite(raw_path_length) else math.nan
@@ -316,6 +356,9 @@ def score_saved_vessel(
     elif config.method_id == "tortuosity_density":
         primary_score = float(density_metrics["tortuosity_density_score"])
         raw_primary_score = float(raw_density_metrics["tortuosity_density_score"])
+    elif config.method_id == "external_angle_sum":
+        primary_score = float(angle_sum_metrics["external_angle_sum_score"])
+        raw_primary_score = float(raw_angle_sum_metrics["external_angle_sum_score"])
     else:
         primary_score = arc_chord_value
         raw_primary_score = arc_chord_value
@@ -375,6 +418,12 @@ def score_saved_vessel(
         "inflection_count": float(density_metrics["inflection_count"]),
         "tortuosity_density_excess": float(density_metrics["tortuosity_density_excess"]),
         "tortuosity_density_valid": bool(density_metrics["tortuosity_density_valid"]),
+        "external_angle_sum_score": float(angle_sum_metrics["external_angle_sum_score"]),
+        "external_angle_sum_bend_point_count": float(angle_sum_metrics["external_angle_sum_bend_point_count"]),
+        "external_angle_sum_simplified_point_count": float(
+            angle_sum_metrics["external_angle_sum_simplified_point_count"]
+        ),
+        "external_angle_sum_mean_angle_deg": float(angle_sum_metrics["external_angle_sum_mean_angle_deg"]),
         "start_endpoint": vessel.get("start_endpoint"),
         "end_endpoint": vessel.get("end_endpoint"),
     }
@@ -576,6 +625,7 @@ def score_branch_fragments(
         v2_metrics = local_bump_v2_metrics(row["path_points"], settings)
         curvature_metrics = curvature_squared_metrics(row["path_points"], settings)
         density_metrics = tortuosity_density_metrics(row["path_points"], settings)
+        angle_sum_metrics = external_angle_sum_metrics(row["path_points"], settings)
         if config.method_id == "local_bump":
             primary_score = metrics["branch_bump_score"]
         elif config.method_id == "local_bump_v2":
@@ -584,6 +634,8 @@ def score_branch_fragments(
             primary_score = curvature_metrics["curvature_squared_score"]
         elif config.method_id == "tortuosity_density":
             primary_score = density_metrics["tortuosity_density_score"]
+        elif config.method_id == "external_angle_sum":
+            primary_score = angle_sum_metrics["external_angle_sum_score"]
         else:
             primary_score = metrics["arc_chord_tortuosity"]
         rows.append(
@@ -601,6 +653,7 @@ def score_branch_fragments(
                 **v2_metrics,
                 **curvature_metrics,
                 **density_metrics,
+                **angle_sum_metrics,
             }
         )
     return pd.DataFrame(rows)
@@ -642,6 +695,10 @@ def build_manual_vessels_export(
                 "inflection_count",
                 "tortuosity_density_excess",
                 "tortuosity_density_valid",
+                "external_angle_sum_score",
+                "external_angle_sum_bend_point_count",
+                "external_angle_sum_simplified_point_count",
+                "external_angle_sum_mean_angle_deg",
             ]
         )
     state_vessels = review_state.get("vessels", {})
@@ -689,6 +746,10 @@ def build_manual_vessels_export(
                 "inflection_count": row["inflection_count"],
                 "tortuosity_density_excess": row["tortuosity_density_excess"],
                 "tortuosity_density_valid": row["tortuosity_density_valid"],
+                "external_angle_sum_score": row["external_angle_sum_score"],
+                "external_angle_sum_bend_point_count": row["external_angle_sum_bend_point_count"],
+                "external_angle_sum_simplified_point_count": row["external_angle_sum_simplified_point_count"],
+                "external_angle_sum_mean_angle_deg": row["external_angle_sum_mean_angle_deg"],
             }
         )
     export_df = pd.DataFrame(rows)
@@ -717,6 +778,7 @@ def build_review_scores_table(
                 "Arc/chord diagnostic": row["arc_chord_diagnostic"],
                 "Courbure^2 diagnostic": row["curvature_squared_score"],
                 "Tortuosity Density diagnostic": row["tortuosity_density_score"],
+                "Somme angles externes diagnostic": row["external_angle_sum_score"],
                 "Longueur du trajet": row["path_length"],
                 "Corde": row["chord_length"],
                 "Segments modele": row["model_segment_count"],
@@ -748,6 +810,8 @@ def top_contributing_vessels(vessel_scores: pd.DataFrame, limit: int = 8) -> lis
         "tortuosity_density_score",
         "constant_curvature_segment_count",
         "inflection_count",
+        "external_angle_sum_score",
+        "external_angle_sum_bend_point_count",
     ]
     available = [column for column in columns if column in vessel_scores.columns]
     rows = vessel_scores.sort_values("primary_score", ascending=False).head(limit)

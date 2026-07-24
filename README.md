@@ -36,7 +36,7 @@ So the final method does **not** score the whole skeleton directly. The whole-sk
 - The Streamlit `Results` tab uses the active saved-vessel scoring method.
 - The PDF report uses the same active saved-vessel scoring method.
 - The CLI `tortuosite_score.vessels_detection.local_bump_score` accepts `--method` and uses the same centralized scoring service.
-- `Local-bump v2 (experimental)`, `Arc/chord`, `Courbure quadratique`, and `Tortuosity Density` can also be selected as primary methods; `Arc/chord` remains available as a diagnostic column.
+- `Local-bump v2 (experimental)`, `Arc/chord`, `Courbure quadratique`, `Tortuosity Density`, and `Somme des angles externes (RDP)` can also be selected as primary methods; `Arc/chord` remains available as a diagnostic column.
 
 ## Scoring method
 
@@ -201,11 +201,33 @@ where (L) is the total vessel length, (L_i) is the arc length of subsegment (i),
 
 The eye-level Tortuosity Density score is the length-weighted mean across eligible saved vessels. It has no upper-tail component and no display multiplier.
 
+### Optional external-angle-sum score
+
+The app also implements a formula supplied for this project, where vessel tortuosity is defined as the sum of all recorded external angles in a single traced vessel:
+
+> "Vessel tortuosity was defined as the sum of all recorded external angles (Θ) in a single traced vessel."
+
+\[
+T_v = \sum_{i=1}^{n} |\theta_i|
+\]
+
+The underlying algorithm never computes a continuous curvature \(\kappa(s)\). Instead, for each saved vessel it:
+
+1. Reuses the already-extracted, already-skeletonized vessel centerline (the four earlier pipeline steps: segmentation, skeletonization, branch extraction, saved-vessel reconstruction).
+2. Simplifies that ordered centerline into straight segments with the Ramer-Douglas-Peucker algorithm, using a fixed tolerance \(\epsilon\) (in normalized px) to discard points that do not bend the trace beyond that tolerance. This keeps only the true "bend points" \(p_0, p_1, \dots, p_n\).
+3. Computes the external (turning) angle \(\theta_i\) at each retained interior bend point, i.e. the angle between the incoming and outgoing straight segments.
+4. Sums the absolute value of every external angle, in degrees, to obtain \(T_v\).
+
+This metric measures the number of turns and how sharp each turn is (close to the total variation of direction along the vessel). It does not directly depend on the vessel length, its radius of curvature, or the derivative of curvature. The RDP tolerance \(\epsilon\) is a fixed method parameter (default 3 normalized px), shown in the app sidebar and PDF report like the other methods' fixed parameters.
+
+The eye-level score is the length-weighted mean across eligible saved vessels, with no upper-tail component and no display multiplier, exactly like the curvature-squared and Tortuosity Density scores above.
+
 The current report score is project-specific and cohort-relative:
 
 - `Score local-bump`: final saved-vessel local-bump eye score.
 - `Score courbure^2`: optional raw curvature-squared eye score when that method is active.
 - `Score Tortuosity Density`: optional raw Tortuosity Density eye score when that method is active.
+- `Score somme des angles externes`: optional raw external-angle-sum eye score (\(T\), in degrees) when that method is active.
 - `Score moyen`: length-weighted mean saved-vessel local-bump burden.
 - `Queue superieure`: upper-tail saved-vessel burden.
 - `Score comparatif`: cohort-normalized `Score local-bump`.

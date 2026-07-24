@@ -14,8 +14,10 @@ from skimage.draw import line
 from tortuosite_score.vessels_detection.local_bump_score import (
     LocalBumpSettings,
     curvature_squared_metrics,
+    external_angle_sum_metrics,
     local_bump_metrics,
     local_bump_v2_metrics,
+    rdp_simplify,
     score_run,
     score_saved_vessels,
     score_root_to_leaf_systems,
@@ -191,6 +193,48 @@ class LocalBumpMetricTests(unittest.TestCase):
 
         self.assertFalse(bool(metrics["tortuosity_density_valid"]))
         self.assertTrue(math.isnan(float(metrics["tortuosity_density_score"])))
+
+    def test_rdp_simplify_collapses_straight_line_to_endpoints(self) -> None:
+        points = np.column_stack([np.linspace(0, 100, 40), np.zeros(40)])
+
+        simplified = rdp_simplify(points, epsilon=1.0)
+
+        self.assertEqual(len(simplified), 2)
+        np.testing.assert_allclose(simplified[0], points[0])
+        np.testing.assert_allclose(simplified[-1], points[-1])
+
+    def test_rdp_simplify_keeps_sharp_corners(self) -> None:
+        points = np.asarray([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [20.0, 10.0]])
+
+        simplified = rdp_simplify(points, epsilon=0.5)
+
+        self.assertEqual(len(simplified), 4)
+
+    def test_external_angle_sum_straight_line_scores_zero(self) -> None:
+        points = [[x, 0.0] for x in np.linspace(0, 200, 80)]
+
+        score = external_angle_sum_metrics(points)
+
+        self.assertAlmostEqual(score["external_angle_sum_score"], 0.0)
+        self.assertEqual(score["external_angle_sum_bend_point_count"], 0.0)
+
+    def test_external_angle_sum_matches_hand_calculated_staircase(self) -> None:
+        points = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [20.0, 10.0]]
+        settings = LocalBumpSettings(rdp_epsilon=0.5)
+
+        metrics = external_angle_sum_metrics(points, settings)
+
+        self.assertEqual(metrics["external_angle_sum_bend_point_count"], 2.0)
+        self.assertAlmostEqual(metrics["external_angle_sum_score"], 180.0)
+        self.assertAlmostEqual(metrics["external_angle_sum_mean_angle_deg"], 90.0)
+
+    def test_external_angle_sum_short_or_degenerate_paths_return_safe_defaults(self) -> None:
+        short_score = external_angle_sum_metrics([[0, 0]])
+        duplicate_score = external_angle_sum_metrics([[0, 0], [0, 0], [0, 0]])
+
+        self.assertEqual(short_score["external_angle_sum_score"], 0.0)
+        self.assertEqual(duplicate_score["external_angle_sum_score"], 0.0)
+        self.assertTrue(math.isfinite(short_score["external_angle_sum_score"]))
 
     def test_eye_summary_uses_tail_component(self) -> None:
         systems = pd.DataFrame(
@@ -372,7 +416,14 @@ class CentralScoringServiceTests(unittest.TestCase):
 
         self.assertEqual(
             methods,
-            {"local_bump", "local_bump_v2", "arc_chord", "curvature_squared", "tortuosity_density"},
+            {
+                "local_bump",
+                "local_bump_v2",
+                "arc_chord",
+                "curvature_squared",
+                "tortuosity_density",
+                "external_angle_sum",
+            },
         )
 
     def test_same_saved_vessel_can_be_scored_by_both_methods(self) -> None:
@@ -392,12 +443,14 @@ class CentralScoringServiceTests(unittest.TestCase):
         bump_v2_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("local_bump_v2"))
         curvature_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("curvature_squared"))
         density_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("tortuosity_density"))
+        angle_sum_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("external_angle_sum"))
 
         self.assertEqual(arc_score["scoring_method"], "arc_chord")
         self.assertEqual(bump_score["scoring_method"], "local_bump")
         self.assertEqual(bump_v2_score["scoring_method"], "local_bump_v2")
         self.assertEqual(curvature_score["scoring_method"], "curvature_squared")
         self.assertEqual(density_score["scoring_method"], "tortuosity_density")
+        self.assertEqual(angle_sum_score["scoring_method"], "external_angle_sum")
         self.assertAlmostEqual(float(arc_score["arc_chord_diagnostic"]), float(arc_score["primary_score"]))
         self.assertGreater(float(bump_score["local_bump_score"]), 0.0)
         self.assertAlmostEqual(float(bump_v2_score["local_bump_v2_score"]), float(bump_v2_score["primary_score"]))
@@ -409,6 +462,11 @@ class CentralScoringServiceTests(unittest.TestCase):
             float(density_score["tortuosity_density_score"]),
             float(density_score["primary_score"]),
         )
+        self.assertAlmostEqual(
+            float(angle_sum_score["external_angle_sum_score"]),
+            float(angle_sum_score["primary_score"]),
+        )
+        self.assertGreater(float(angle_sum_score["primary_score"]), 0.0)
 
     def test_coordinate_normalization_makes_scaled_geometry_comparable(self) -> None:
         def score_for(points: list[list[float]], scale: float) -> dict[str, object]:
@@ -442,6 +500,34 @@ class CentralScoringServiceTests(unittest.TestCase):
             float(normalized_score["raw_primary_score"]),
             float(normalized_score["primary_score"]),
             places=6,
+        )
+
+    def test_external_angle_sum_uses_normalized_geometry(self) -> None:
+        def score_for(points: list[list[float]], scale: float) -> dict[str, object]:
+            segment = VesselSegment.from_manual_points(1, points)
+            segment_map = build_segment_map(pd.DataFrame(), {"1": segment.to_manual_payload()})
+            vessel = {
+                "category": "artere",
+                "segment_refs": [segment.ref],
+                "synthetic_links": [],
+                "start_endpoint": {"kind": "geometry_point", "point": points[0], "segment_ref": segment.ref},
+                "end_endpoint": {"kind": "geometry_point", "point": points[-1], "segment_ref": segment.ref},
+            }
+            return score_saved_vessel(
+                segment_map,
+                "v1",
+                vessel,
+                config=scoring_config("external_angle_sum"),
+                coordinate_scale=scale,
+            )
+
+        base = [[0, 0], [40, 12], [80, -12], [120, 12], [160, 0]]
+        enlarged = [[4 * x, 4 * y] for x, y in base]
+
+        self.assertAlmostEqual(
+            float(score_for(base, 1.0)["primary_score"]),
+            float(score_for(enlarged, 0.25)["primary_score"]),
+            places=10,
         )
 
     def test_tortuosity_density_uses_normalized_geometry_and_inverse_length_units(self) -> None:
@@ -625,6 +711,7 @@ class CentralScoringServiceTests(unittest.TestCase):
         arc_chord_parameters = dict(scoring_method_fixed_parameters(scoring_config("arc_chord")))
         density_parameters = dict(scoring_method_fixed_parameters(scoring_config("tortuosity_density")))
         v2_parameters = dict(scoring_method_fixed_parameters(scoring_config("local_bump_v2")))
+        angle_sum_parameters = dict(scoring_method_fixed_parameters(scoring_config("external_angle_sum")))
 
         self.assertIn("Seuil de courbure locale", local_bump_parameters)
         self.assertIn("Pas de re-echantillonnage", local_bump_parameters)
@@ -655,6 +742,14 @@ class CentralScoringServiceTests(unittest.TestCase):
         )
         self.assertEqual(v2_parameters["Angle minimal d'un lobe persistant"], "0.150 rad")
         self.assertEqual(v2_parameters["Poids de l'angularite"], "0.25")
+        self.assertEqual(
+            angle_sum_parameters,
+            {
+                "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
+                "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
+                "Tolerance de simplification RDP": "3.0 px normalises",
+            },
+        )
 
 
 class LocalBumpV2DiagnosticExamplesTests(unittest.TestCase):
