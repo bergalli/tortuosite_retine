@@ -138,7 +138,7 @@ def build_classified_vessel_sheets(data: pd.DataFrame) -> dict[str, pd.DataFrame
             "Clean_vessels": long_format.copy(),
             "Rejected_vessels": long_format.copy(),
         }
-    eligible = long_format["analysis_eligible"].fillna(False).astype(bool)
+    eligible = long_format["classified_export_eligible"].fillna(False).astype(bool)
     return {
         "Clean_vessels": long_format[eligible].reset_index(drop=True),
         "Rejected_vessels": long_format[~eligible].reset_index(drop=True),
@@ -174,6 +174,8 @@ def _classified_long_format(data: pd.DataFrame) -> pd.DataFrame:
             "diametre_reference_px": "reference_diameter_px",
             "eligible_analyse": "analysis_eligible",
             "raison_exclusion_analyse": "analysis_exclusion_reason",
+            "eligible_export_classifie": "classified_export_eligible",
+            "raison_exclusion_export_classifie": "classified_export_exclusion_reason",
             "score_local_bump_v1": "local_bump_v1_score",
             "score_local_bump_v2": "local_bump_v2_score",
             "composante_oscillation_v2": "local_bump_v2_oscillation_component",
@@ -214,6 +216,8 @@ def _raw_export_columns() -> list[str]:
         "normalization_factor",
         "analysis_eligible",
         "analysis_exclusion_reason",
+        "classified_export_eligible",
+        "classified_export_exclusion_reason",
         # Final score values.
         "score_raw",
         "score_normalized",
@@ -285,6 +289,7 @@ def build_structured_vessel_data(
             raw_score = _finite_float(score_row.get("raw_primary_score", score_row.get("primary_score")))
             length = _finite_float(score_row.get("vessel_length"))
             length_eligible = bool(score_row.get("meets_length_threshold", score_row.get("eligible", True)))
+            scoring_eligible = bool(score_row.get("eligible", False))
             analysis_eligible, exclusion_reason = analysis_vessel_eligibility(
                 vessel_name,
                 score_row.get("category"),
@@ -292,6 +297,15 @@ def build_structured_vessel_data(
             )
             valid_clinical_name = _is_ranked_artery(vessel_info)
             usable_geometry = math.isfinite(length) and length > 0
+            classified_export_eligible, classified_export_exclusion_reason = (
+                classified_vessel_export_eligibility(
+                    vessel_info,
+                    analysis_eligible=analysis_eligible,
+                    scoring_eligible=scoring_eligible,
+                    score=score,
+                    vessel_length=length,
+                )
+            )
             rows.append(
                 {
                     "patient_id": run_info.patient_id,
@@ -315,6 +329,8 @@ def build_structured_vessel_data(
                     "nom_clinique_valide": valid_clinical_name,
                     "eligible_analyse": analysis_eligible,
                     "raison_exclusion_analyse": exclusion_reason,
+                    "eligible_export_classifie": classified_export_eligible,
+                    "raison_exclusion_export_classifie": classified_export_exclusion_reason,
                     "methode_id": method.method_id,
                     "methode": score_row.get("scoring_method_label"),
                     "score_local_bump_v1": _finite_float(score_row.get("local_bump_score")) * 1000.0,
@@ -453,6 +469,30 @@ def analysis_vessel_eligibility(
         return False, "zero_length"
     if not _is_ranked_artery(parse_vessel_name(vessel_name, category)):
         return False, "unclassified_name"
+    return True, ""
+
+
+def classified_vessel_export_eligibility(
+    vessel_info: VesselNameInfo,
+    *,
+    analysis_eligible: bool,
+    scoring_eligible: bool,
+    score: object,
+    vessel_length: object,
+) -> tuple[bool, str]:
+    """Return eligibility for the classified raw workbook without changing rank analysis."""
+
+    if analysis_eligible:
+        return True, ""
+    length = _finite_float(vessel_length)
+    if not math.isfinite(length) or length <= 0:
+        return False, "zero_length"
+    if vessel_info.vessel_type != "veine" or vessel_info.is_ambiguous:
+        return False, "unclassified_type"
+    if not math.isfinite(_finite_float(score)):
+        return False, "invalid_score"
+    if not scoring_eligible:
+        return False, "scoring_ineligible"
     return True, ""
 
 
@@ -1262,6 +1302,8 @@ def _structured_columns() -> list[str]:
         "nom_clinique_valide",
         "eligible_analyse",
         "raison_exclusion_analyse",
+        "eligible_export_classifie",
+        "raison_exclusion_export_classifie",
         "methode_id",
         "methode",
         "score_local_bump_v1",

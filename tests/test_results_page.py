@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
+from PIL import Image
 
 from tortuosite_score.app.results_page import (
+    _build_atlas_systems_table,
     _build_all_systems_table,
     _build_local_bump_summary_table,
     _build_local_bump_pvalue_matrices,
@@ -15,6 +20,8 @@ from tortuosite_score.app.results_page import (
     _stats_table_font_size,
     _top_system_rows,
     _top_system_table,
+    _render_ranked_system_crop,
+    _render_saved_vessel_overlay,
     build_adjusted_pvalue_matrix,
     build_pvalue_matrix,
     build_results_viewer_segments,
@@ -339,6 +346,88 @@ class ResultsPageTests(unittest.TestCase):
 
         self.assertEqual(display["Vaisseau"].tolist(), ["1°A-sup"])
         self.assertEqual(display["Rang"].tolist(), [1])
+
+    def test_atlas_table_uses_active_scoring_eligibility_for_arteries_and_veins(self) -> None:
+        scored_runs = [
+            (
+                _fake_run_dir("eye_a"),
+                {"eye_number": "OD"},
+                pd.DataFrame(
+                    {
+                        "vessel_name": ["artery", "vein", "short"],
+                        "category": ["artere", "veine", "veine"],
+                        "eligible": [True, True, False],
+                        "primary_score": [1.0, 3.0, 9.0],
+                        "vessel_length": [120.0, 140.0, 20.0],
+                        "path_points": [
+                            [[0.0, 0.0], [1.0, 1.0]],
+                            [[0.0, 0.0], [2.0, 2.0]],
+                            [[0.0, 0.0], [3.0, 3.0]],
+                        ],
+                    }
+                ),
+            )
+        ]
+
+        atlas = _build_atlas_systems_table(scored_runs)
+
+        self.assertEqual(atlas["Vaisseau"].tolist(), ["vein", "artery"])
+        self.assertEqual(atlas["Categorie"].tolist(), ["veine", "artere"])
+
+    def test_saved_vessel_overlay_uses_source_image_and_type_colors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            Image.new("RGB", (40, 40), "black").save(run_dir / "source.png")
+            (run_dir / "metadata.json").write_text(
+                json.dumps({"image_name": "source.png"}),
+                encoding="utf-8",
+            )
+            output_dir = run_dir / "output"
+            output_dir.mkdir()
+            Image.new("RGB", (40, 40), "white").save(output_dir / "07b_skeleton_overlay.png")
+            saved = pd.DataFrame(
+                {
+                    "category": ["artere", "veine"],
+                    "eligible": [True, False],
+                    "path_points": [
+                        [[5.0, 10.0], [35.0, 10.0]],
+                        [[5.0, 20.0], [35.0, 20.0]],
+                    ],
+                }
+            )
+
+            overlay = _render_saved_vessel_overlay(run_dir, saved)
+
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        self.assertEqual(overlay.getpixel((20, 10)), (255, 69, 58))
+        self.assertEqual(overlay.getpixel((20, 20)), (76, 141, 255))
+        self.assertEqual(overlay.getpixel((20, 30)), (0, 0, 0))
+
+    def test_atlas_crop_keeps_yellow_path_and_uses_type_border(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            Image.new("RGB", (40, 40), "black").save(run_dir / "source.png")
+            (run_dir / "metadata.json").write_text(
+                json.dumps({"image_name": "source.png"}),
+                encoding="utf-8",
+            )
+            path_points = [[5.0, 20.0], [35.0, 20.0]]
+            saved = pd.DataFrame({"category": ["veine"], "path_points": [path_points]})
+            row = pd.Series(
+                {
+                    "_run_dir": run_dir,
+                    "_path_points": path_points,
+                    "Categorie": "veine",
+                }
+            )
+
+            crop = _render_ranked_system_crop(row, saved)
+
+        self.assertIsNotNone(crop)
+        assert crop is not None
+        self.assertEqual(crop.getpixel((0, 0)), (76, 141, 255))
+        self.assertEqual(crop.getpixel((260, 150)), (255, 225, 86))
 
     def test_local_bump_summary_table_sorts_by_weighted_mean(self) -> None:
         scored_runs = [

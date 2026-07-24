@@ -369,7 +369,11 @@ def _generate_local_bump_results_pdf_from_scores(
         _add_local_bump_scores_page(pdf, summary_table, scoring_config)
         for run_dir, summary, system_scores in scored_runs:
             _add_local_bump_run_page(pdf, run_dir, summary, system_scores)
-        _add_all_systems_pdf_pages(pdf, _build_all_systems_table(scored_runs))
+        _add_all_systems_pdf_pages(
+            pdf,
+            _build_atlas_systems_table(scored_runs),
+            {run_dir.name: system_scores for run_dir, _summary, system_scores in scored_runs},
+        )
     return buffer.getvalue()
 
 
@@ -629,9 +633,27 @@ def _column_total(table: pd.DataFrame, column: str) -> float:
 
 
 def _build_all_systems_table(scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]]) -> pd.DataFrame:
+    return _build_systems_table(scored_runs, analysis_only=True)
+
+
+def _build_atlas_systems_table(
+    scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]],
+) -> pd.DataFrame:
+    return _build_systems_table(scored_runs, analysis_only=False)
+
+
+def _build_systems_table(
+    scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]],
+    *,
+    analysis_only: bool,
+) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for run_dir, summary, vessel_scores in scored_runs:
-        eligible = _analysis_eligible_system_scores(vessel_scores)
+        eligible = (
+            _analysis_eligible_system_scores(vessel_scores)
+            if analysis_only
+            else _eligible_system_scores(vessel_scores)
+        )
         if eligible.empty:
             continue
         for _, row in eligible.iterrows():
@@ -865,7 +887,7 @@ def _add_local_bump_run_page(
     text_ax.axis("off")
     image_ax.set_title(f"{run_dir.name} - vaisseaux sauvegardes scores", fontsize=13)
     top_systems = _top_system_rows(system_scores)
-    overlay = _load_skeleton_report_image(run_dir, top_systems)
+    overlay = _load_skeleton_report_image(run_dir, system_scores, top_systems)
     if overlay is not None:
         image_ax.imshow(overlay)
     else:
@@ -888,7 +910,11 @@ def _add_local_bump_run_page(
     pdf.savefig(fig, bbox_inches="tight")
 
 
-def _add_all_systems_pdf_pages(pdf: PdfPages, all_systems_table: pd.DataFrame) -> None:
+def _add_all_systems_pdf_pages(
+    pdf: PdfPages,
+    all_systems_table: pd.DataFrame,
+    system_scores_by_run: dict[str, pd.DataFrame],
+) -> None:
     rows_per_page = 12
     total_rows = len(all_systems_table)
     page_count = max(1, math.ceil(total_rows / rows_per_page))
@@ -901,8 +927,8 @@ def _add_all_systems_pdf_pages(pdf: PdfPages, all_systems_table: pd.DataFrame) -
         title_ax.text(
             0.0,
             0.55,
-            "Chaque vignette montre un vaisseau retenu (memes regles que Clean_vessels: arteres classees de rang 1-3), "
-            "trie du plus au moins eleve selon la methode active. Le surlignage jaune correspond exactement a la geometrie mesuree.",
+            "Chaque vignette montre un vaisseau sauvegarde retenu par la methode active, trie du plus au moins "
+            "tortueux. Le jaune correspond a la geometrie mesuree; la bordure indique le type: rouge = artere, bleu = veine.",
             va="top",
             fontsize=9,
             wrap=True,
@@ -914,7 +940,8 @@ def _add_all_systems_pdf_pages(pdf: PdfPages, all_systems_table: pd.DataFrame) -
         flat_axes = list(axes.flat)
         for ax, (_, row) in zip(flat_axes, page.iterrows(), strict=False):
             ax.axis("off")
-            crop = _render_ranked_system_crop(row)
+            saved_vessels = system_scores_by_run.get(str(row.get("Image", "")), pd.DataFrame())
+            crop = _render_ranked_system_crop(row, saved_vessels)
             if crop is not None:
                 ax.imshow(crop)
             else:
@@ -930,16 +957,22 @@ def _add_all_systems_pdf_pages(pdf: PdfPages, all_systems_table: pd.DataFrame) -
         pdf.savefig(fig, bbox_inches="tight")
 
 
-def _render_ranked_system_crop(system_row: pd.Series, output_size: tuple[int, int] = (520, 300)) -> Image.Image | None:
+def _render_ranked_system_crop(
+    system_row: pd.Series,
+    saved_vessels: pd.DataFrame,
+    output_size: tuple[int, int] = (520, 300),
+) -> Image.Image | None:
     run_dir = system_row.get("_run_dir")
     if not isinstance(run_dir, Path):
         return None
-    image = _load_base_skeleton_image(run_dir)
+    image = _render_saved_vessel_overlay(run_dir, saved_vessels)
     if image is None:
         return None
     points = _valid_path_points(system_row.get("_path_points"))
     if len(points) < 2:
-        return image.resize(output_size)
+        canvas = image.resize(output_size)
+        _draw_atlas_type_border(canvas, system_row.get("Categorie"))
+        return canvas
 
     padding = 70
     min_x = max(0, int(math.floor(min(point[0] for point in points) - padding)))
@@ -947,7 +980,9 @@ def _render_ranked_system_crop(system_row: pd.Series, output_size: tuple[int, in
     min_y = max(0, int(math.floor(min(point[1] for point in points) - padding)))
     max_y = min(image.height, int(math.ceil(max(point[1] for point in points) + padding)))
     if max_x <= min_x or max_y <= min_y:
-        return image.resize(output_size)
+        canvas = image.resize(output_size)
+        _draw_atlas_type_border(canvas, system_row.get("Categorie"))
+        return canvas
 
     crop = image.crop((min_x, min_y, max_x, max_y)).convert("RGB")
     scale = min(output_size[0] / crop.width, output_size[1] / crop.height)
@@ -964,16 +999,49 @@ def _render_ranked_system_crop(system_row: pd.Series, output_size: tuple[int, in
     draw = ImageDraw.Draw(canvas)
     draw.line(shifted, fill=(0, 0, 0), width=9, joint="curve")
     draw.line(shifted, fill=(255, 225, 86), width=5, joint="curve")
-    draw.rectangle((0, 0, output_size[0] - 1, output_size[1] - 1), outline=(255, 255, 255), width=1)
+    _draw_atlas_type_border(canvas, system_row.get("Categorie"))
     return canvas
 
 
-def _load_base_skeleton_image(run_dir: Path) -> Image.Image | None:
-    for file_name in ["07b_skeleton_overlay.png", "07_skeleton.png"]:
-        image_path = run_dir / "output" / file_name
+def _load_source_image(run_dir: Path) -> Image.Image | None:
+    metadata = read_json(run_dir / "metadata.json")
+    image_name = metadata.get("image_name")
+    if isinstance(image_name, str):
+        image_path = run_dir / image_name
         if image_path.exists():
             return Image.open(image_path).convert("RGB")
     return None
+
+
+def _vessel_rgb(category: object) -> tuple[int, int, int]:
+    color = ARTERE_COLOR if str(category) == "artere" else VEINE_COLOR
+    return _hex_to_rgb(color)
+
+
+def _draw_atlas_type_border(image: Image.Image, category: object) -> None:
+    draw = ImageDraw.Draw(image)
+    draw.rectangle(
+        (0, 0, image.width - 1, image.height - 1),
+        outline=_vessel_rgb(category),
+        width=6,
+    )
+
+
+def _render_saved_vessel_overlay(run_dir: Path, saved_vessels: pd.DataFrame) -> Image.Image | None:
+    image = _load_source_image(run_dir)
+    if image is None:
+        return None
+    if saved_vessels.empty or "path_points" not in saved_vessels.columns:
+        return image
+
+    draw = ImageDraw.Draw(image)
+    stroke_width = max(3, int(round(min(image.size) / 350.0)))
+    for _, row in saved_vessels.iterrows():
+        points = _valid_path_points(row.get("path_points"))
+        if len(points) < 2:
+            continue
+        draw.line(points, fill=_vessel_rgb(row.get("category")), width=stroke_width, joint="curve")
+    return image
 
 
 def _valid_path_points(points: object) -> list[tuple[float, float]]:
@@ -990,16 +1058,18 @@ def _valid_path_points(points: object) -> list[tuple[float, float]]:
     return valid
 
 
-def _load_skeleton_report_image(run_dir: Path, top_systems: pd.DataFrame) -> Image.Image | None:
-    for file_name in ["07b_skeleton_overlay.png", "07_skeleton.png"]:
-        image_path = run_dir / "output" / file_name
-        if image_path.exists():
-            image = Image.open(image_path).convert("RGB")
-            original_size = image.size
-            image.thumbnail((1500, 1100))
-            _draw_top_system_highlights(image, original_size, top_systems)
-            return image
-    return None
+def _load_skeleton_report_image(
+    run_dir: Path,
+    saved_vessels: pd.DataFrame,
+    top_systems: pd.DataFrame,
+) -> Image.Image | None:
+    image = _render_saved_vessel_overlay(run_dir, saved_vessels)
+    if image is None:
+        return None
+    original_size = image.size
+    image.thumbnail((1500, 1100))
+    _draw_top_system_highlights(image, original_size, top_systems)
+    return image
 
 
 def _top_system_rows(system_scores: pd.DataFrame, limit: int = 8) -> pd.DataFrame:

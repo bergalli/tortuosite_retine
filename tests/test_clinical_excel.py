@@ -189,6 +189,8 @@ class ClinicalExcelTests(unittest.TestCase):
             "normalization_factor",
             "analysis_eligible",
             "analysis_exclusion_reason",
+            "classified_export_eligible",
+            "classified_export_exclusion_reason",
             "score_raw",
             "score_normalized",
             "local_bump_v1_score",
@@ -217,6 +219,59 @@ class ClinicalExcelTests(unittest.TestCase):
         self.assertIn("inferior", set(clean["territory"].dropna()))
         self.assertNotIn("global_weight", clean.columns)
         self.assertNotIn("high_tail_weight", clean.columns)
+
+    def test_classified_excel_includes_valid_scored_veins_and_labels_rejections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dirs = _make_run_dirs(root, ["1_OD"])
+            scores = pd.DataFrame(
+                {
+                    "eligible": [True, False, False, False],
+                    "meets_length_threshold": [True, False, True, True],
+                    "vessel_name": [
+                        "veine temp sup",
+                        "veine courte inf",
+                        "veine score invalide",
+                        "artere veine ambigu",
+                    ],
+                    "category": ["veine", "veine", "veine", "veine"],
+                    "primary_score": [0.8, 0.7, float("nan"), 0.6],
+                    "vessel_length": [120.0, 40.0, 130.0, 140.0],
+                    "scoring_method_label": ["Local-bump"] * 4,
+                }
+            )
+            with patch(
+                "tortuosite_score.vessels_detection.clinical_excel.score_run",
+                return_value=({}, scores),
+            ):
+                excel_bytes = generate_classified_vessels_excel(
+                    run_dirs,
+                    scoring_config(),
+                    root / "missing.csv",
+                )
+
+        workbook = pd.ExcelFile(io.BytesIO(excel_bytes))
+        clean = pd.read_excel(workbook, "Clean_vessels")
+        rejected = pd.read_excel(workbook, "Rejected_vessels").set_index("vessel_name")
+
+        self.assertEqual(clean["vessel_name"].tolist(), ["veine temp sup"])
+        self.assertEqual(clean.loc[0, "vessel_type"], "vein")
+        self.assertTrue(pd.isna(clean.loc[0, "rank"]))
+        self.assertEqual(clean.loc[0, "territory"], "superior")
+        self.assertTrue(bool(clean.loc[0, "classified_export_eligible"]))
+        self.assertFalse(bool(clean.loc[0, "analysis_eligible"]))
+        self.assertEqual(
+            rejected.loc["veine courte inf", "classified_export_exclusion_reason"],
+            "scoring_ineligible",
+        )
+        self.assertEqual(
+            rejected.loc["veine score invalide", "classified_export_exclusion_reason"],
+            "invalid_score",
+        )
+        self.assertEqual(
+            rejected.loc["artere veine ambigu", "classified_export_exclusion_reason"],
+            "unclassified_type",
+        )
 
     def test_combined_outputs_score_each_run_only_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
