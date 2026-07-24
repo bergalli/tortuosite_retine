@@ -175,20 +175,24 @@ class ResultsPageTests(unittest.TestCase):
         self.assertTrue(pdf_bytes.startswith(b"%PDF"))
         self.assertGreater(len(pdf_bytes), 1000)
 
-    def test_local_bump_pvalue_matrices_use_raw_excel_clean_vessels(self) -> None:
+    def test_local_bump_pvalue_matrices_include_clean_arteries_and_eligible_veins(self) -> None:
         scored_runs = [
             (
                 _fake_run_dir("eye_a"),
                 {},
                 pd.DataFrame(
                     {
-                        # The short but classified artery is kept. The scorer-eligible
-                        # vein is rejected, exactly as in the raw Excel workbook.
-                        "vessel_name": ["1°A-sup", "VEINE TEMPORALE INF", "unknown"],
-                        "category": ["artere", "artere", "artere"],
-                        "vessel_length": [50.0, 150.0, 150.0],
-                        "eligible": [False, True, True],
-                        "primary_score": [1.0, 9.9, 8.8],
+                        "vessel_name": [
+                            "1°A-sup",
+                            "VEINE TEMPORALE INF",
+                            "veine courte",
+                            "veine score invalide",
+                            "unknown",
+                        ],
+                        "category": ["artere", "veine", "veine", "veine", "artere"],
+                        "vessel_length": [50.0, 150.0, 40.0, 150.0, 150.0],
+                        "eligible": [False, True, False, False, True],
+                        "primary_score": [1.0, 9.9, 7.7, float("nan"), 8.8],
                     }
                 ),
             ),
@@ -208,13 +212,16 @@ class ResultsPageTests(unittest.TestCase):
         ]
 
         raw, adjusted = _build_local_bump_pvalue_matrices(scored_runs)
+        expected_raw = build_pvalue_matrix(
+            {
+                "eye_a": [1.0, 9.9],
+                "eye_b": [2.0, 2.1],
+            }
+        )
+        expected_adjusted = build_adjusted_pvalue_matrix(expected_raw)
 
-        self.assertEqual(raw.index.tolist(), ["eye_a", "eye_b"])
-        self.assertEqual(raw.columns.tolist(), ["eye_a", "eye_b"])
-        self.assertEqual(raw.loc["eye_a", "eye_a"], "-")
-        self.assertGreater(float(raw.loc["eye_a", "eye_b"]), 0.5)
-        self.assertLess(float(raw.loc["eye_b", "eye_a"]), 0.5)
-        self.assertLessEqual(float(raw.loc["eye_b", "eye_a"]), float(adjusted.loc["eye_b", "eye_a"]))
+        pd.testing.assert_frame_equal(raw, expected_raw)
+        pd.testing.assert_frame_equal(adjusted, expected_adjusted)
 
     def test_local_bump_scores_pdf_table_uses_descriptive_columns(self) -> None:
         summary_table = pd.DataFrame(

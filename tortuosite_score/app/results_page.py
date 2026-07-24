@@ -23,7 +23,9 @@ from tortuosite_score.app.review_state import (
 from tortuosite_score.vessels_detection.local_bump_score import weighted_mean
 from tortuosite_score.vessels_detection.clinical_excel import (
     analysis_vessel_eligibility,
+    classified_vessel_export_eligibility,
     generate_clinical_excel_outputs,
+    parse_vessel_name,
 )
 from tortuosite_score.vessels_detection.scoring import (
     ScoringConfig,
@@ -42,7 +44,7 @@ STATS_EXPLANATION = (
 )
 RAW_PVALUE_EXPLANATION = (
     "Chaque cellule compare l'image en ligne a l'image en colonne avec un test de Mann-Whitney unilateral "
-    "sur les seuls vaisseaux valides de l'onglet Clean_vessels de l'export brut "
+    "sur les arteres classees de rang 1-3 et les veines scorees valides de l'onglet Clean_vessels de l'export brut "
     "(alternative: la distribution des scores des vaisseaux valides de la ligne est plus elevee que celle de la "
     "colonne). Ces p-values brutes repondent donc a une question simple: l'oeil de la ligne a-t-il des scores "
     "globalement plus eleves que l'oeil de la colonne ?"
@@ -531,17 +533,17 @@ def _build_local_bump_pvalue_matrices(
     scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     scores_by_image = {
-        run_dir.name: _analysis_eligible_primary_scores(system_scores)
+        run_dir.name: _classified_export_primary_scores(system_scores)
         for run_dir, _summary, system_scores in scored_runs
     }
     raw_matrix = build_pvalue_matrix(scores_by_image)
     return raw_matrix, build_adjusted_pvalue_matrix(raw_matrix)
 
 
-def _analysis_eligible_primary_scores(system_scores: pd.DataFrame) -> list[float]:
+def _classified_export_primary_scores(system_scores: pd.DataFrame) -> list[float]:
     """Scores from the same vessels exported in the raw Excel Clean_vessels sheet."""
 
-    eligible = _analysis_eligible_system_scores(system_scores)
+    eligible = _classified_export_eligible_system_scores(system_scores)
     if eligible.empty or "primary_score" not in eligible.columns:
         return []
     scores: list[float] = []
@@ -553,6 +555,32 @@ def _analysis_eligible_primary_scores(system_scores: pd.DataFrame) -> list[float
         if math.isfinite(numeric):
             scores.append(numeric)
     return scores
+
+
+def _classified_export_eligible_system_scores(system_scores: pd.DataFrame) -> pd.DataFrame:
+    required_columns = {"vessel_name", "vessel_length", "primary_score"}
+    if system_scores.empty or not required_columns.issubset(system_scores.columns):
+        return pd.DataFrame()
+
+    keep_mask: list[bool] = []
+    for _, row in system_scores.iterrows():
+        vessel_name = str(row.get("vessel_name", ""))
+        category = row.get("category")
+        vessel_length = row.get("vessel_length")
+        analysis_eligible = analysis_vessel_eligibility(
+            vessel_name,
+            category,
+            vessel_length,
+        )[0]
+        export_eligible = classified_vessel_export_eligibility(
+            parse_vessel_name(vessel_name, category),
+            analysis_eligible=analysis_eligible,
+            scoring_eligible=bool(row.get("eligible", False)),
+            score=row.get("primary_score"),
+            vessel_length=vessel_length,
+        )[0]
+        keep_mask.append(export_eligible)
+    return system_scores.loc[keep_mask].copy()
 
 
 def _analysis_eligible_system_scores(system_scores: pd.DataFrame) -> pd.DataFrame:
@@ -751,9 +779,9 @@ def _add_model_description_page(
     total_saved = _summary_column_total(summary_table, "Vaisseaux sauvegardes")
     total_kept = _summary_column_total(summary_table, "Vaisseaux retenus")
     if total_saved:
-        kept_line = f"Vaisseaux retenus pour les scores et p-values: {total_kept:.0f} / {total_saved:.0f}"
+        kept_line = f"Vaisseaux retenus pour les scores: {total_kept:.0f} / {total_saved:.0f}"
     else:
-        kept_line = "Vaisseaux retenus pour les scores et p-values: NA"
+        kept_line = "Vaisseaux retenus pour les scores: NA"
     ax.text(
         0.08,
         0.42,
