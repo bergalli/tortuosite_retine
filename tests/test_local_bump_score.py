@@ -30,6 +30,7 @@ from tortuosite_score.vessels_detection.scoring import (
     build_review_scores_table,
     scoring_config,
     scoring_method_fixed_parameters,
+    scoring_method_spec,
     score_run as score_run_with_method,
     summarize_eye_score as summarize_saved_eye_score,
     score_saved_vessel,
@@ -411,6 +412,24 @@ class SavedRunSmokeTests(unittest.TestCase):
 
 
 class CentralScoringServiceTests(unittest.TestCase):
+    def test_reported_aggregation_formulas_match_central_service(self) -> None:
+        local_bump_equations = scoring_method_spec("local_bump").report_equations
+        self.assertTrue(any("0.70 x G + 0.30 x T" in equation for equation in local_bump_equations))
+
+        for method_id in (
+            "local_bump_v2",
+            "arc_chord",
+            "curvature_squared",
+            "tortuosity_density",
+            "external_angle_sum",
+        ):
+            equations = scoring_method_spec(method_id).report_equations
+            self.assertTrue(any("S_oeil =" in equation for equation in equations), method_id)
+            self.assertFalse(any("queue superieure" in equation for equation in equations), method_id)
+
+        curvature_steps = scoring_method_spec("curvature_squared").report_steps
+        self.assertFalse(any("lisser" in step.lower() for step in curvature_steps))
+
     def test_method_registry_contains_arc_chord_and_local_bump(self) -> None:
         methods = {method.method_id for method in available_scoring_methods()}
 

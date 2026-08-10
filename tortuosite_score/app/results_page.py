@@ -77,9 +77,10 @@ LOCAL_BUMP_V2_METHOD_EXPLANATION = (
 )
 CURVATURE_SQUARED_METHOD_EXPLANATION = (
     "Le score actuel est calcule uniquement sur les vaisseaux sauvegardes. Pour chaque vaisseau, la ligne centrale "
-    "ordonnee est re-echantillonnee puis legerement lissee. La courbure locale est estimee numeriquement le long de "
-    "l'abscisse curviligne, puis le carre de cette courbure est integre et divise par la longueur du vaisseau. Le "
-    "score obtenu correspond a la valeur brute de la formule T = (1 / L) integral kappa(s)^2 ds."
+    "ordonnee est re-echantillonnee si ce pretraitement est actif, sans lissage. La courbure locale est estimee "
+    "numeriquement le long de l'abscisse curviligne, puis le carre de cette courbure est integre et divise par la "
+    "longueur du vaisseau. Le score obtenu correspond a la valeur brute de la formule "
+    "T = (1 / L) integral kappa(s)^2 ds."
 )
 ARC_CHORD_METHOD_EXPLANATION = (
     "Le score actuel est calcule uniquement sur les vaisseaux sauvegardes. Pour chaque vaisseau, la longueur du trajet "
@@ -831,12 +832,19 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
     }.get(method.method_id, LOCAL_BUMP_METHOD_EXPLANATION)
     ax.text(0.08, 0.88, explanation, va="top", fontsize=10, wrap=True)
     steps = list(method.report_steps)
-    if method.method_id in {"local_bump", "curvature_squared"}:
+    if method.method_id == "local_bump":
         steps[2] = f"3. Normaliser le diametre du fond d'oeil a 1024 px, puis exclure les vaisseaux sous {settings.min_saved_vessel_length:.0f} px normalises."
         steps[3] = f"4. Re-echantillonner chaque vaisseau tous les {settings.resample_step:.1f} px normalises."
         steps[4] = f"5. Lisser legerement la ligne centrale: fenetre {settings.smoothing_window} points."
     if method.method_id == "local_bump":
         steps[6] = f"7. Ignorer les changements minuscules: seuil {settings.curvature_threshold:.3f} rad."
+    elif method.method_id == "curvature_squared":
+        steps[2] = f"3. Normaliser le diametre du fond d'oeil a 1024 px, puis exclure les vaisseaux sous {settings.min_saved_vessel_length:.0f} px normalises."
+        steps[3] = (
+            f"4. Re-echantillonner chaque vaisseau tous les {settings.resample_step:.1f} px normalises, sans lissage."
+            if settings.resample_curvature_squared
+            else "4. Conserver les points normalises d'origine, sans re-echantillonnage ni lissage."
+        )
     elif method.method_id == "local_bump_v2":
         steps[2] = f"3. Normaliser le fond d'oeil puis exclure les vaisseaux sous {settings.min_saved_vessel_length:.0f} px normalises."
         steps[3] = f"4. Re-echantillonner tous les {settings.resample_step:.1f} px et lisser sur {settings.smoothing_window} points sans restaurer les extremites."

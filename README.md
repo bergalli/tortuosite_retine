@@ -10,6 +10,9 @@ Without `skan`, skeleton tortuosity uses a built-in scikit-image graph fallback 
 
 # Saved-vessel tortuosity scoring
 
+The code-audited mathematical reference for every available method is
+[`docs/scoring-formulas.md`](docs/scoring-formulas.md).
+
 Compute the saved-vessel tortuosity score from already saved Streamlit/VascX runs:
 
 ```bash
@@ -180,7 +183,7 @@ The app can also use a direct curvature-energy score:
 Q_v = \frac{1}{L_v}\int_0^{L_v} \kappa(s)^2\,ds
 \]
 
-where \(s\) is arc length and the local curvature is estimated from the resampled, lightly smoothed centerline:
+where \(s\) is arc length and the local curvature is estimated from the resampled, unsmoothed centerline (resampling can be disabled):
 
 \[
 \kappa(s) =
