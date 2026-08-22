@@ -23,6 +23,20 @@ This writes eye-level and saved-vessel score CSVs without rerunning segmentation
 By default, the CLI and PDF report use the numbered `*_OD` / `*_OG` cohort when present, because those are the clinically labelled eyes. Use `--include-all-runs` to include legacy-style folders such as `OD_de_*`.
 The app sidebar now exposes the active scoring method globally; review tables, Results, PDF reports, and regenerated CSV exports all follow that same method.
 
+The Results page names the classified raw workbook
+`classified_vessels_raw_<method_id>.xlsx`. In particular,
+`classified_vessels_raw_local_bump.xlsx` uses Local-bump v1 (the default), while
+`classified_vessels_raw_local_bump_v2.xlsx` uses the experimental v2 score as
+the active score. Both workbooks retain the `local_bump_v1_score` and
+`local_bump_v2_score` audit columns; `score_raw` and `score_normalized` follow
+the method named in the file suffix.
+
+The same page can download `segmentations_arteres_veines.zip`. It contains one
+folder per eye and four fundus overlays: separate artery and vein images, each
+with an annotated and an unannotated version. The annotated versions use
+normalized rank/type labels such as `2°A` and `3°V`. Images include only
+ranked vessels that pass the final `Clean_vessels` raw-export filter.
+
 ## Method currently used in the app
 
 The app now separates two concerns:

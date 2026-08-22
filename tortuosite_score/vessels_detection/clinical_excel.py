@@ -415,9 +415,14 @@ def parse_run_name(run_name: str) -> RunInfo:
 
 def parse_vessel_name(vessel_name: str, category: object | None = None) -> VesselNameInfo:
     normalized = _normalize_name(vessel_name)
-    rank = _artery_rank(vessel_name, normalized)
-    looks_vein = bool(re.search(r"\b(v|vein|veine|vine)\b|veine|vein|vine", normalized))
-    looks_artery = rank is not None or bool(re.search(r"\b(a|artere|artery)\b|artere|artery|\bati\b|\bats\b", normalized))
+    artery_rank = _artery_rank(vessel_name, normalized)
+    vein_rank = _vein_rank(vessel_name, normalized)
+    looks_vein = vein_rank is not None or bool(
+        re.search(r"\b(v|vein|veine|vine)\b|veine|vein|vine", normalized)
+    )
+    looks_artery = artery_rank is not None or bool(
+        re.search(r"\b(a|artere|artery)\b|artere|artery|\bati\b|\bats\b", normalized)
+    )
     if not looks_vein and not looks_artery:
         category_text = _normalize_name(str(category or ""))
         if "veine" in category_text:
@@ -440,15 +445,14 @@ def parse_vessel_name(vessel_name: str, category: object | None = None) -> Vesse
         territory = "sup"
     is_ambiguous = looks_artery and looks_vein or (has_inf and has_sup)
     issue = ""
+    rank = artery_rank if vessel_type == "artere" else vein_rank if vessel_type == "veine" else None
     if is_ambiguous:
         issue = "nom_ambigu"
     elif vessel_type == "unknown":
         issue = "type_non_classe"
     elif vessel_type == "artere" and rank is None:
         issue = "rang_arteriel_non_classe"
-    elif vessel_type == "veine" and rank is not None:
-        issue = "veine_avec_rang_detecte"
-    return VesselNameInfo(vessel_name, normalized, rank if vessel_type == "artere" else None, vessel_type, territory, is_ambiguous, issue)
+    return VesselNameInfo(vessel_name, normalized, rank, vessel_type, territory, is_ambiguous, issue)
 
 
 def _is_ranked_artery(vessel: VesselNameInfo) -> bool:
@@ -502,6 +506,21 @@ def _artery_rank(original_name: str, normalized: str) -> int | None:
         r"(^|\b)([123])\s*°?\s*a\b",
         r"\bartere[_\s-]*([123])\b",
         r"\b([123])\s*(?:er|eme|e)\b.*\b(?:artere|ati|ats)\b",
+    ]
+    for pattern in patterns:
+        for text in [original, normalized]:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return int(match.group(match.lastindex))
+    return None
+
+
+def _vein_rank(original_name: str, normalized: str) -> int | None:
+    original = original_name.lower()
+    patterns = [
+        r"(^|\b)([123])\s*°?\s*v\b",
+        r"\bve(?:in|ine)[_\s-]*([123])\b",
+        r"\b([123])\s*(?:er|eme|e)\b.*\b(?:v|vein|veine|vine)\b",
     ]
     for pattern in patterns:
         for text in [original, normalized]:

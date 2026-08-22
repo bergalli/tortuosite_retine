@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageChops
 
 from tortuosite_score.app.results_page import (
     _build_atlas_systems_table,
@@ -22,11 +24,15 @@ from tortuosite_score.app.results_page import (
     _top_system_table,
     _render_ranked_system_crop,
     _render_saved_vessel_overlay,
+    _normalized_vessel_label,
+    _path_midpoint_and_angle,
     build_adjusted_pvalue_matrix,
     build_pvalue_matrix,
     build_results_viewer_segments,
     build_result_rows,
     generate_results_pdf,
+    generate_vessel_type_segmentation_zip,
+    render_vessel_type_segmentation_image,
     tortuosity_values,
     visible_result_table,
     _wrapped_cell_text,
@@ -410,6 +416,115 @@ class ResultsPageTests(unittest.TestCase):
         self.assertEqual(overlay.getpixel((20, 10)), (255, 69, 58))
         self.assertEqual(overlay.getpixel((20, 20)), (76, 141, 255))
         self.assertEqual(overlay.getpixel((20, 30)), (0, 0, 0))
+
+    def test_vessel_type_segmentation_uses_ranked_clean_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "1_OD"
+            run_dir.mkdir()
+            Image.new("RGB", (120, 120), "black").save(run_dir / "source.png")
+            (run_dir / "metadata.json").write_text(json.dumps({"image_name": "source.png"}), encoding="utf-8")
+            vessels = pd.DataFrame(
+                {
+                    "vessel_name": [
+                        "1°A-sup",
+                        "2°A-inf",
+                        "1°V-sup",
+                        "2°V-inf",
+                        "veine temp sup",
+                        "1°A veine ambigu",
+                    ],
+                    "category": ["artere", "artere", "veine", "veine", "veine", "artere"],
+                    "vessel_length": [120.0, 0.0, 120.0, 120.0, 120.0, 120.0],
+                    "primary_score": [float("nan"), 0.8, 0.7, 0.6, 0.5, 0.4],
+                    "eligible": [False, True, True, False, True, True],
+                    "path_points": [
+                        [[10.0, 20.0], [110.0, 20.0]],
+                        [[10.0, 40.0], [110.0, 40.0]],
+                        [[10.0, 60.0], [110.0, 60.0]],
+                        [[10.0, 80.0], [110.0, 80.0]],
+                        [[10.0, 100.0], [110.0, 100.0]],
+                        [[10.0, 110.0], [110.0, 110.0]],
+                    ],
+                }
+            )
+
+            arteries = render_vessel_type_segmentation_image(run_dir, vessels, "artere", False)
+            veins = render_vessel_type_segmentation_image(run_dir, vessels, "veine", False)
+
+        self.assertIsNotNone(arteries)
+        self.assertIsNotNone(veins)
+        assert arteries is not None and veins is not None
+        header_height = arteries.height - 120
+        self.assertEqual(arteries.getpixel((30, header_height + 20)), (255, 69, 58))
+        self.assertEqual(arteries.getpixel((30, header_height + 40)), (0, 0, 0))
+        self.assertEqual(arteries.getpixel((30, header_height + 60)), (0, 0, 0))
+        self.assertEqual(arteries.getpixel((30, header_height + 110)), (0, 0, 0))
+        self.assertEqual(veins.getpixel((30, header_height + 20)), (0, 0, 0))
+        self.assertEqual(veins.getpixel((30, header_height + 60)), (76, 141, 255))
+        self.assertEqual(veins.getpixel((30, header_height + 80)), (0, 0, 0))
+        self.assertEqual(veins.getpixel((30, header_height + 100)), (0, 0, 0))
+
+    def test_labeled_segmentation_adds_normalized_rank_type_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "1_OD"
+            run_dir.mkdir()
+            Image.new("RGB", (160, 120), "black").save(run_dir / "source.png")
+            (run_dir / "metadata.json").write_text(json.dumps({"image_name": "source.png"}), encoding="utf-8")
+            vessels = pd.DataFrame(
+                {
+                    "vessel_name": ["2°A-sup"],
+                    "category": ["artere"],
+                    "vessel_length": [120.0],
+                    "primary_score": [0.8],
+                    "eligible": [True],
+                    "path_points": [[[20.0, 60.0], [140.0, 60.0]]],
+                }
+            )
+
+            plain = render_vessel_type_segmentation_image(run_dir, vessels, "artere", False)
+            labeled = render_vessel_type_segmentation_image(run_dir, vessels, "artere", True)
+
+        self.assertEqual(_normalized_vessel_label(2, "artere"), "2°A")
+        self.assertEqual(_normalized_vessel_label(3, "veine"), "3°V")
+        assert plain is not None and labeled is not None
+        self.assertIsNotNone(ImageChops.difference(plain, labeled).getbbox())
+
+    def test_vessel_label_rotation_follows_path_and_stays_upright(self) -> None:
+        forward = _path_midpoint_and_angle([(0.0, 0.0), (100.0, 100.0)])
+        reverse = _path_midpoint_and_angle([(100.0, 100.0), (0.0, 0.0)])
+
+        self.assertEqual(forward, (50.0, 50.0, 45.0))
+        self.assertEqual(reverse, (50.0, 50.0, 45.0))
+
+    def test_vessel_type_segmentation_zip_has_four_images_per_eye(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "1_OD"
+            run_dir.mkdir()
+            Image.new("RGB", (40, 40), "black").save(run_dir / "source.png")
+            (run_dir / "metadata.json").write_text(json.dumps({"image_name": "source.png"}), encoding="utf-8")
+            archive_bytes = generate_vessel_type_segmentation_zip([(run_dir, {}, pd.DataFrame())])
+
+        with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                [
+                    "1_OD/arteres.png",
+                    "1_OD/arteres_annotees.png",
+                    "1_OD/veines.png",
+                    "1_OD/veines_annotees.png",
+                    "README.txt",
+                ],
+            )
+
+    def test_vessel_type_segmentation_zip_notes_missing_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "missing_OD"
+            run_dir.mkdir()
+            archive_bytes = generate_vessel_type_segmentation_zip([(run_dir, {}, pd.DataFrame())])
+
+        with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
+            self.assertEqual(archive.namelist(), ["README.txt"])
+            self.assertIn("missing_OD", archive.read("README.txt").decode("utf-8"))
 
     def test_atlas_crop_keeps_yellow_path_and_uses_type_border(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

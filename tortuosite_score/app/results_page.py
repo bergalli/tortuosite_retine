@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import math
 import re
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -468,6 +469,17 @@ def render_results_page(scoring_config: ScoringConfig | None = None) -> None:
         file_name=f"rapport_tortuosite_{method.method_id}.pdf",
         mime="application/pdf",
     )
+    st.download_button(
+        "Generer les images arteres et veines",
+        data=generate_vessel_type_segmentation_zip(scored_runs),
+        file_name="segmentations_arteres_veines.zip",
+        mime="application/zip",
+        help=(
+            "Cree un dossier par oeil avec quatre fonds d'oeil : arteres et veines, "
+            "avec et sans labels de rang. Seuls les vaisseaux classes de rang 1 a 3 "
+            "retenus dans l'export brut sont affiches."
+        ),
+    )
     clinical_excel, classified_vessels_excel = generate_clinical_excel_outputs(runs, scoring_config)
     st.download_button(
         "Generer l'Excel comparaison des rangs 1, 2 et 3",
@@ -480,6 +492,10 @@ def render_results_page(scoring_config: ScoringConfig | None = None) -> None:
         data=classified_vessels_excel,
         file_name=f"classified_vessels_raw_{method.method_id}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help=(
+            "Le suffixe est l'identifiant de la methode active: local_bump = v1 par defaut; "
+            "local_bump_v2 = v2 experimentale. Le classeur conserve aussi les colonnes d'audit v1 et v2."
+        ),
     )
 
 
@@ -1080,6 +1096,180 @@ def _render_saved_vessel_overlay(run_dir: Path, saved_vessels: pd.DataFrame) -> 
     return image
 
 
+def render_vessel_type_segmentation_image(
+    run_dir: Path,
+    saved_vessels: pd.DataFrame,
+    vessel_type: str,
+    labeled: bool,
+) -> Image.Image | None:
+    """Render one artery-only or vein-only publication-friendly overlay.
+
+    Vessels must pass the same final filter as the classified raw workbook and
+    have a clinical rank from 1 to 3. Labeled images use normalized rank/type
+    labels rather than the full saved vessel names.
+    """
+
+    if vessel_type not in {"artere", "veine"}:
+        raise ValueError("vessel_type must be 'artere' or 'veine'")
+    source = _load_source_image(run_dir)
+    if source is None:
+        return None
+
+    header_height = max(48, int(round(min(source.size) * 0.055)))
+    image = Image.new("RGB", (source.width, source.height + header_height), (18, 22, 28))
+    image.paste(source, (0, header_height))
+    draw = ImageDraw.Draw(image)
+    font = _load_font(max(15, int(round(header_height * 0.34))))
+    title = "Arteres" if vessel_type == "artere" else "Veines"
+    legend = "rangs 1-3   |   rouge" if vessel_type == "artere" else "rangs 1-3   |   bleu"
+    draw.text((14, header_height / 2), title, fill=(255, 255, 255), font=font, anchor="lm")
+    draw.text(
+        (source.width - 14, header_height / 2),
+        legend,
+        fill=(220, 225, 232),
+        font=font,
+        anchor="rm",
+    )
+
+    eligible_vessels = _classified_export_eligible_system_scores(saved_vessels)
+    if eligible_vessels.empty or "path_points" not in eligible_vessels.columns:
+        return image
+    stroke_width = max(3, int(round(min(source.size) / 260.0)))
+    outline_width = stroke_width + max(2, stroke_width // 2)
+    rendered: list[tuple[list[tuple[float, float]], str]] = []
+    for _, row in eligible_vessels.iterrows():
+        vessel = parse_vessel_name(str(row.get("vessel_name", "")), row.get("category"))
+        if vessel.vessel_type != vessel_type or vessel.rank not in {1, 2, 3}:
+            continue
+        points = [(x, y + header_height) for x, y in _valid_path_points(row.get("path_points"))]
+        if len(points) < 2:
+            continue
+        draw.line(points, fill=(0, 0, 0), width=outline_width, joint="curve")
+        draw.line(points, fill=_vessel_rgb(vessel.vessel_type), width=stroke_width, joint="curve")
+        rendered.append((points, _normalized_vessel_label(vessel.rank, vessel.vessel_type)))
+
+    if labeled:
+        label_font = _load_font(max(18, min(42, int(round(min(source.size) / 28.0)))))
+        for points, text in rendered:
+            _draw_rotated_vessel_label(image, points, text, label_font)
+    return image
+
+
+def generate_vessel_type_segmentation_zip(
+    scored_runs: list[tuple[Path, dict[str, object], pd.DataFrame]],
+) -> bytes:
+    """Return four artery/vein overlays for every eye with a source image."""
+
+    buffer = io.BytesIO()
+    skipped: list[str] = []
+    variants = [
+        ("artere", False, "arteres.png"),
+        ("artere", True, "arteres_annotees.png"),
+        ("veine", False, "veines.png"),
+        ("veine", True, "veines_annotees.png"),
+    ]
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for run_dir, _summary, saved_vessels in scored_runs:
+            folder = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_dir.name).strip("._") or "eye"
+            if _load_source_image(run_dir) is None:
+                skipped.append(run_dir.name)
+                continue
+            for vessel_type, labeled, filename in variants:
+                overlay = render_vessel_type_segmentation_image(
+                    run_dir,
+                    saved_vessels,
+                    vessel_type,
+                    labeled,
+                )
+                if overlay is None:  # The source was already checked; retain a defensive guard.
+                    continue
+                png = io.BytesIO()
+                overlay.save(png, format="PNG")
+                archive.writestr(f"{folder}/{filename}", png.getvalue())
+        notes = [
+            "Visualisation des arteres et veines classees",
+            "Rouge : arteres de rang 1 a 3.",
+            "Bleu : veines de rang 1 a 3.",
+            "Les versions annotees affichent des labels normalises comme 2°A ou 3°V.",
+            "Seuls les vaisseaux retenus dans Clean_vessels et possedant un rang sont affiches.",
+        ]
+        if skipped:
+            notes.append("Images source introuvables pour : " + ", ".join(sorted(set(skipped))))
+        archive.writestr("README.txt", "\n".join(notes) + "\n")
+    return buffer.getvalue()
+
+
+def _normalized_vessel_label(rank: int, vessel_type: str) -> str:
+    suffix = "A" if vessel_type == "artere" else "V"
+    return f"{rank}°{suffix}"
+
+
+def _draw_rotated_vessel_label(
+    image: Image.Image,
+    points: list[tuple[float, float]],
+    text: str,
+    font: ImageFont.ImageFont,
+) -> None:
+    placement = _path_midpoint_and_angle(points)
+    if placement is None:
+        return
+    center_x, center_y, angle = placement
+    stroke_width = 2
+    padding = 5
+    probe = ImageDraw.Draw(image)
+    bbox = probe.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+    width = max(1, bbox[2] - bbox[0] + 2 * padding)
+    height = max(1, bbox[3] - bbox[1] + 2 * padding)
+    label = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    label_draw = ImageDraw.Draw(label)
+    label_draw.text(
+        (padding - bbox[0], padding - bbox[1]),
+        text,
+        font=font,
+        fill=(255, 255, 255, 255),
+        stroke_width=stroke_width,
+        stroke_fill=(0, 0, 0, 230),
+    )
+    rotated = label.rotate(-angle, resample=Image.Resampling.BICUBIC, expand=True)
+    position = (
+        int(round(center_x - rotated.width / 2)),
+        int(round(center_y - rotated.height / 2)),
+    )
+    image.paste(rotated, position, rotated)
+
+
+def _path_midpoint_and_angle(
+    points: list[tuple[float, float]],
+) -> tuple[float, float, float] | None:
+    segments: list[tuple[tuple[float, float], tuple[float, float], float]] = []
+    total_length = 0.0
+    for start, end in zip(points, points[1:]):
+        length = math.hypot(end[0] - start[0], end[1] - start[1])
+        if length <= 0:
+            continue
+        segments.append((start, end, length))
+        total_length += length
+    if not segments or total_length <= 0:
+        return None
+
+    target = total_length / 2.0
+    traversed = 0.0
+    for start, end, length in segments:
+        if traversed + length < target:
+            traversed += length
+            continue
+        ratio = (target - traversed) / length
+        center_x = start[0] + ratio * (end[0] - start[0])
+        center_y = start[1] + ratio * (end[1] - start[1])
+        angle = math.degrees(math.atan2(end[1] - start[1], end[0] - start[0]))
+        if angle > 90:
+            angle -= 180
+        elif angle < -90:
+            angle += 180
+        return center_x, center_y, angle
+    return None
+
+
 def _valid_path_points(points: object) -> list[tuple[float, float]]:
     if not isinstance(points, list):
         return []
@@ -1409,6 +1599,7 @@ def _load_font(size: int) -> ImageFont.ImageFont:
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/Library/Fonts/Arial Bold.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]:
         path = Path(font_path)
         if path.exists():

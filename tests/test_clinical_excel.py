@@ -54,6 +54,21 @@ class ClinicalExcelTests(unittest.TestCase):
                 self.assertIsNone(parsed.rank)
                 self.assertEqual(parsed.territory, territory)
 
+    def test_parse_ranked_veins(self) -> None:
+        cases = {
+            "1°V-inf": (1, "inf"),
+            "2°V-sup": (2, "sup"),
+            "veine_3-inf": (3, "inf"),
+        }
+
+        for name, (rank, territory) in cases.items():
+            with self.subTest(name=name):
+                parsed = parse_vessel_name(name)
+                self.assertEqual(parsed.vessel_type, "veine")
+                self.assertEqual(parsed.rank, rank)
+                self.assertEqual(parsed.territory, territory)
+                self.assertEqual(parsed.issue, "")
+
     def test_manual_name_takes_precedence_over_saved_category(self) -> None:
         parsed = parse_vessel_name("VEINE TEMPORALE INF", category="artere")
 
