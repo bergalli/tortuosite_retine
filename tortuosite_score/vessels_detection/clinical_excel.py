@@ -359,6 +359,13 @@ def build_structured_vessel_data(
                     "geometrie_tortuosity_density_valide": bool(
                         score_row.get("tortuosity_density_valid", False)
                     ),
+                    "grisan_score": _finite_float(score_row.get("grisan_score")),
+                    "grisan_sous_segments_courbure_constante": _finite_float(
+                        score_row.get("grisan_segment_count")
+                    ),
+                    "grisan_nombre_inflexions": _finite_float(score_row.get("grisan_inflection_count")),
+                    "grisan_exces_arc_corde": _finite_float(score_row.get("grisan_excess_sum")),
+                    "grisan_geometrie_valide": bool(score_row.get("grisan_valid", False)),
                     "poids_global": scoring_config.local_bump_settings.global_weight,
                     "poids_queue_haute": scoring_config.local_bump_settings.tail_weight,
                     "fraction_queue_haute": scoring_config.local_bump_settings.tail_length_fraction,
@@ -1339,6 +1346,11 @@ def _structured_columns() -> list[str]:
         "nombre_inflexions",
         "exces_arc_corde_tortuosity_density",
         "geometrie_tortuosity_density_valide",
+        "grisan_score",
+        "grisan_sous_segments_courbure_constante",
+        "grisan_nombre_inflexions",
+        "grisan_exces_arc_corde",
+        "grisan_geometrie_valide",
         "poids_global",
         "poids_queue_haute",
         "fraction_queue_haute",

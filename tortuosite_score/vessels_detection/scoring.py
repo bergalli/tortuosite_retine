@@ -17,6 +17,7 @@ from tortuosite_score.vessels_detection.local_bump_score import (
     add_comparative_hybrid_score,
     curvature_squared_metrics,
     external_angle_sum_metrics,
+    grisan_metrics,
     load_saved_run_branches,
     local_bump_metrics,
     local_bump_v2_metrics,
@@ -38,6 +39,7 @@ ScoringMethodId = Literal[
     "curvature_squared",
     "tortuosity_density",
     "external_angle_sum",
+    "grisan",
 ]
 DEFAULT_SCORING_METHOD: ScoringMethodId = "local_bump"
 
@@ -205,6 +207,35 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
         ),
         eye_score_scale=1.0,
     ),
+    "grisan": ScoringMethodSpec(
+        method_id="grisan",
+        label="Grisan (2008)",
+        primary_score_label="Score Grisan",
+        eye_score_label="Score Grisan",
+        short_description=(
+            "Formule originale de Grisan et al. (2008) : vaisseau lisse par spline cubique, "
+            "segmente par hysteresis sur le signe de la courbure, puis combine la longueur "
+            "d'arc relative de chaque segment et leur nombre."
+        ),
+        report_method_title="score Grisan (2008) sur vaisseaux sauvegardes",
+        report_steps=(
+            "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
+            "2. Reconstituer la ligne centrale ordonnee de chaque vaisseau sauvegarde.",
+            "3. Exclure les vaisseaux trop courts selon le seuil actif.",
+            "4. Lisser la ligne centrale avec une spline cubique de lissage parametrique.",
+            "5. Calculer la courbure signee le long de la spline lissee.",
+            "6. Diviser le vaisseau en sous-segments de courbure de signe constant, en confirmant "
+            "chaque changement de signe par hysteresis (deux seuils) pour ignorer le bruit.",
+            "7. Mesurer la longueur d'arc et la corde de chaque sous-segment sur la spline lissee.",
+            "8. Appliquer la formule de Grisan (eq. 19) puis agreger l'oeil entier.",
+        ),
+        report_equations=(
+            "n = nombre de sous-segments de courbure de signe constant",
+            "tau_Grisan = ((n - 1) / n) x (1 / L) x somme_i(L_i / C_i - 1)",
+            "S_oeil = somme(L_v x tau_Grisan,v) / somme(L_v)",
+        ),
+        eye_score_scale=1.0,
+    ),
 }
 
 
@@ -218,6 +249,7 @@ def available_scoring_methods() -> list[ScoringMethodSpec]:
             "curvature_squared",
             "tortuosity_density",
             "external_angle_sum",
+            "grisan",
         ]
     ]
 
@@ -278,6 +310,16 @@ def scoring_method_fixed_parameters(config: ScoringConfig | None = None) -> list
             *shared_parameters,
             ("Tolerance de simplification RDP", f"{settings.rdp_epsilon:.1f} px normalises"),
         ]
+    if config.method_id == "grisan":
+        return [
+            *shared_parameters,
+            ("Lissage de la spline cubique", f"s={settings.grisan_spline_smoothing:.1f}"),
+            (
+                "Seuils d'hysteresis sur la courbure",
+                f"bas={settings.grisan_curvature_hysteresis_low:.4f}, "
+                f"haut={settings.grisan_curvature_hysteresis_high:.4f}",
+            ),
+        ]
     return shared_parameters
 
 
@@ -332,11 +374,13 @@ def score_saved_vessel(
     raw_curvature_metrics = curvature_squared_metrics(raw_path_points, settings)
     raw_density_metrics = tortuosity_density_metrics(raw_path_points, settings)
     raw_angle_sum_metrics = external_angle_sum_metrics(raw_path_points, settings)
+    raw_grisan_metrics = grisan_metrics(raw_path_points, settings)
     local_metrics = local_bump_metrics(normalized_path_points, settings)
     local_v2_metrics = local_bump_v2_metrics(normalized_path_points, settings)
     curvature_metrics = curvature_squared_metrics(normalized_path_points, settings)
     density_metrics = tortuosity_density_metrics(normalized_path_points, settings)
     angle_sum_metrics = external_angle_sum_metrics(normalized_path_points, settings)
+    grisan_result_metrics = grisan_metrics(normalized_path_points, settings)
     raw_path_length = float(diagnostic.get("length", math.nan))
     raw_chord_length = float(diagnostic.get("chord", math.nan))
     path_length = raw_path_length * scale if math.isfinite(raw_path_length) else math.nan
@@ -357,6 +401,9 @@ def score_saved_vessel(
     elif config.method_id == "external_angle_sum":
         primary_score = float(angle_sum_metrics["external_angle_sum_score"])
         raw_primary_score = float(raw_angle_sum_metrics["external_angle_sum_score"])
+    elif config.method_id == "grisan":
+        primary_score = float(grisan_result_metrics["grisan_score"])
+        raw_primary_score = float(raw_grisan_metrics["grisan_score"])
     else:
         primary_score = arc_chord_value
         raw_primary_score = arc_chord_value
@@ -422,6 +469,11 @@ def score_saved_vessel(
             angle_sum_metrics["external_angle_sum_simplified_point_count"]
         ),
         "external_angle_sum_mean_angle_deg": float(angle_sum_metrics["external_angle_sum_mean_angle_deg"]),
+        "grisan_score": float(grisan_result_metrics["grisan_score"]),
+        "grisan_segment_count": float(grisan_result_metrics["grisan_segment_count"]),
+        "grisan_inflection_count": float(grisan_result_metrics["grisan_inflection_count"]),
+        "grisan_excess_sum": float(grisan_result_metrics["grisan_excess_sum"]),
+        "grisan_valid": bool(grisan_result_metrics["grisan_valid"]),
         "start_endpoint": vessel.get("start_endpoint"),
         "end_endpoint": vessel.get("end_endpoint"),
     }
@@ -624,6 +676,7 @@ def score_branch_fragments(
         curvature_metrics = curvature_squared_metrics(row["path_points"], settings)
         density_metrics = tortuosity_density_metrics(row["path_points"], settings)
         angle_sum_metrics = external_angle_sum_metrics(row["path_points"], settings)
+        grisan_result_metrics = grisan_metrics(row["path_points"], settings)
         if config.method_id == "local_bump":
             primary_score = metrics["branch_bump_score"]
         elif config.method_id == "local_bump_v2":
@@ -634,6 +687,8 @@ def score_branch_fragments(
             primary_score = density_metrics["tortuosity_density_score"]
         elif config.method_id == "external_angle_sum":
             primary_score = angle_sum_metrics["external_angle_sum_score"]
+        elif config.method_id == "grisan":
+            primary_score = grisan_result_metrics["grisan_score"]
         else:
             primary_score = metrics["arc_chord_tortuosity"]
         rows.append(
@@ -652,6 +707,7 @@ def score_branch_fragments(
                 **curvature_metrics,
                 **density_metrics,
                 **angle_sum_metrics,
+                **grisan_result_metrics,
             }
         )
     return pd.DataFrame(rows)
@@ -697,6 +753,11 @@ def build_manual_vessels_export(
                 "external_angle_sum_bend_point_count",
                 "external_angle_sum_simplified_point_count",
                 "external_angle_sum_mean_angle_deg",
+                "grisan_score",
+                "grisan_segment_count",
+                "grisan_inflection_count",
+                "grisan_excess_sum",
+                "grisan_valid",
             ]
         )
     state_vessels = review_state.get("vessels", {})
@@ -748,6 +809,11 @@ def build_manual_vessels_export(
                 "external_angle_sum_bend_point_count": row["external_angle_sum_bend_point_count"],
                 "external_angle_sum_simplified_point_count": row["external_angle_sum_simplified_point_count"],
                 "external_angle_sum_mean_angle_deg": row["external_angle_sum_mean_angle_deg"],
+                "grisan_score": row["grisan_score"],
+                "grisan_segment_count": row["grisan_segment_count"],
+                "grisan_inflection_count": row["grisan_inflection_count"],
+                "grisan_excess_sum": row["grisan_excess_sum"],
+                "grisan_valid": row["grisan_valid"],
             }
         )
     export_df = pd.DataFrame(rows)
@@ -777,6 +843,7 @@ def build_review_scores_table(
                 "Courbure^2 diagnostic": row["curvature_squared_score"],
                 "Tortuosity Density diagnostic": row["tortuosity_density_score"],
                 "Somme angles externes diagnostic": row["external_angle_sum_score"],
+                "Grisan diagnostic": row["grisan_score"],
                 "Longueur du trajet": row["path_length"],
                 "Corde": row["chord_length"],
                 "Segments modele": row["model_segment_count"],

@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import re
+import warnings
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,9 @@ DEFAULT_BRIDGE_TOLERANCE = 18.0
 DEFAULT_BRIDGE_DIRECTION_COSINE = 0.35
 DEFAULT_MIN_SAVED_VESSEL_LENGTH = 100.0
 DEFAULT_RDP_EPSILON = 3.0
+DEFAULT_GRISAN_SPLINE_SMOOTHING = 20.0
+DEFAULT_GRISAN_HYSTERESIS_LOW = 0.01
+DEFAULT_GRISAN_HYSTERESIS_HIGH = 0.03
 DISPLAY_SCALE = 1000.0
 REFERENCE_FUNDUS_DIAMETER = 1024.0
 
@@ -59,6 +63,9 @@ class LocalBumpSettings:
     filter_short_vessels: bool = True
     resample_curvature_squared: bool = True
     rdp_epsilon: float = DEFAULT_RDP_EPSILON
+    grisan_spline_smoothing: float = DEFAULT_GRISAN_SPLINE_SMOOTHING
+    grisan_curvature_hysteresis_low: float = DEFAULT_GRISAN_HYSTERESIS_LOW
+    grisan_curvature_hysteresis_high: float = DEFAULT_GRISAN_HYSTERESIS_HIGH
 
 
 def local_bump_metrics(
@@ -323,6 +330,196 @@ def external_angle_sum_metrics(
         "external_angle_sum_mean_angle_deg": mean_angle,
         "external_angle_sum_score": total_angle_sum,
     }
+
+
+def arc_chord_metrics(
+    points: list[list[float]] | np.ndarray,
+    settings: LocalBumpSettings | None = None,
+) -> dict[str, float]:
+    """Ratio of path length to chord length, callable on a bare polyline.
+
+    ``scoring.py`` computes this ratio inline from ``score_segments()``'s
+    run-directory plumbing for saved vessels. This standalone version exists
+    so callers without a saved-vessel run (e.g. synthetic benchmark curves)
+    can score arc/chord the same way as the other metric functions.
+    """
+    del settings
+    path = _prepare_path(points)
+    if len(path) < 2:
+        return {"arc_chord_score": math.nan, "arc_chord_branch_length": 0.0, "arc_chord_chord_length": 0.0}
+    branch_length = polyline_length(path)
+    chord_length = float(np.linalg.norm(path[-1] - path[0]))
+    score = float(branch_length / chord_length) if chord_length > 1e-9 else math.nan
+    return {
+        "arc_chord_score": score,
+        "arc_chord_branch_length": float(branch_length),
+        "arc_chord_chord_length": chord_length,
+    }
+
+
+def grisan_metrics(
+    points: list[list[float]] | np.ndarray,
+    settings: LocalBumpSettings | None = None,
+) -> dict[str, float | bool]:
+    """Compute the Grisan et al. (2008) tortuosity density, eq. (19).
+
+    Faithful to the paper: the vessel is smoothed with a cubic smoothing
+    spline, split into turn curves at hysteresis-confirmed curvature-sign
+    changes, and both the arc length and chord of each turn curve are
+    measured on the smoothed spline curve (matching the paper's Sec. IV-B,
+    where "all the tortuosity measures... were computed" on the interpolated
+    vessels). This differs from :func:`tortuosity_density_metrics`, which
+    measures segment lengths on the raw, unsmoothed geometry and omits the
+    ``(n-1)/n`` factor from eq. (19).
+    """
+    settings = settings or LocalBumpSettings()
+    path = _prepare_path(points)
+    if len(path) < 4:
+        return _empty_grisan_metrics(valid=False)
+
+    spline_result = _fit_smoothing_spline(path, settings.resample_step, settings.grisan_spline_smoothing)
+    if spline_result is None:
+        return _empty_grisan_metrics(valid=False)
+    dense_points, cumulative, curvature = spline_result
+
+    total_length = float(cumulative[-1])
+    if total_length <= 0:
+        return _empty_grisan_metrics(valid=False)
+
+    boundaries = _hysteresis_sign_boundaries(
+        curvature,
+        cumulative,
+        settings.grisan_curvature_hysteresis_low,
+        settings.grisan_curvature_hysteresis_high,
+    )
+
+    split_distances = np.asarray([0.0, *boundaries, total_length], dtype=float)
+    segment_count = len(split_distances) - 1
+    excess_sum = 0.0
+    for start_distance, end_distance in zip(split_distances[:-1], split_distances[1:]):
+        arc_length = float(end_distance - start_distance)
+        start_point = _point_at_arc_distance(dense_points, cumulative, float(start_distance))
+        end_point = _point_at_arc_distance(dense_points, cumulative, float(end_distance))
+        chord_length = float(np.linalg.norm(end_point - start_point))
+        if arc_length <= 0 or chord_length <= 1e-9:
+            return _empty_grisan_metrics(
+                segment_count=segment_count,
+                inflection_count=len(boundaries),
+                valid=False,
+            )
+        excess_sum += arc_length / chord_length - 1.0
+
+    score = 0.0 if segment_count <= 1 else float((segment_count - 1) / segment_count / total_length * excess_sum)
+    return {
+        "grisan_score": score,
+        "grisan_segment_count": float(segment_count),
+        "grisan_inflection_count": float(len(boundaries)),
+        "grisan_excess_sum": float(excess_sum),
+        "grisan_valid": True,
+    }
+
+
+def _fit_smoothing_spline(
+    path: np.ndarray,
+    resample_step: float,
+    smoothing_factor: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Fit a parametric cubic smoothing spline and densely resample it.
+
+    Returns ``(dense_points, cumulative_arc_length, curvature)`` where
+    curvature follows formula (8) of the paper, evaluated analytically from
+    the spline's first and second derivatives (the curvature formula for a
+    parametric curve is invariant to reparametrization, so derivatives with
+    respect to the spline parameter are used directly rather than
+    reparametrizing by arc length). Returns ``None`` if the input is too
+    degenerate to fit.
+    """
+    from scipy.interpolate import splev, splprep
+
+    deltas = np.diff(path, axis=0)
+    segment_lengths = np.linalg.norm(deltas, axis=1)
+    cumulative_raw = np.concatenate([[0.0], np.cumsum(segment_lengths)])
+    total_raw = float(cumulative_raw[-1])
+    if total_raw <= 0:
+        return None
+    u = cumulative_raw / total_raw
+
+    degree = min(3, len(path) - 1)
+    if degree < 1:
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            tck, _ = splprep([path[:, 0], path[:, 1]], u=u, k=degree, s=float(smoothing_factor))
+    except Exception:
+        return None
+
+    sample_count = max(int(total_raw / max(float(resample_step), 1.0)) + 1, 20)
+    u_dense = np.linspace(0.0, 1.0, sample_count)
+    x, y = splev(u_dense, tck, der=0)
+    dx, dy = splev(u_dense, tck, der=1)
+    ddx, ddy = splev(u_dense, tck, der=2)
+
+    dense_points = np.column_stack([x, y])
+    dense_cumulative = np.concatenate(
+        [[0.0], np.cumsum(np.linalg.norm(np.diff(dense_points, axis=0), axis=1))]
+    )
+
+    speed_squared = dx * dx + dy * dy
+    denominator = np.power(speed_squared, 1.5)
+    curvature = np.divide(
+        dx * ddy - dy * ddx,
+        denominator,
+        out=np.zeros_like(denominator, dtype=float),
+        where=denominator > 1e-12,
+    )
+    curvature = np.nan_to_num(curvature, nan=0.0, posinf=0.0, neginf=0.0)
+    return dense_points, dense_cumulative, curvature
+
+
+def _hysteresis_sign_boundaries(
+    curvature: np.ndarray,
+    arc_distances: np.ndarray,
+    low: float,
+    high: float,
+) -> list[float]:
+    """Locate confirmed curvature-sign changes with a two-band hysteresis.
+
+    A sign is only "confirmed" once ``|curvature| >= high``. Once confirmed,
+    the state only flips after the curvature reaches ``high`` in the opposite
+    direction; small chatter that stays within the ``low`` band around zero is
+    ignored. Each confirmed boundary is placed halfway (in arc distance)
+    between where the curve first leaves the confident ``low`` band of its
+    current sign and where it first enters the ``high`` band of the opposite
+    sign -- the arc-length analogue of Fig. 6 in Grisan et al. (2008), which
+    the paper only describes with a figure rather than pseudocode.
+    """
+    low = abs(float(low))
+    high = max(abs(float(high)), low)
+    current_sign = 0
+    ambiguous_start: int | None = None
+    boundaries: list[float] = []
+    for index, value in enumerate(curvature):
+        if current_sign == 0:
+            if value >= high:
+                current_sign = 1
+            elif value <= -high:
+                current_sign = -1
+            continue
+        still_confident = (current_sign > 0 and value >= low) or (current_sign < 0 and value <= -low)
+        if still_confident:
+            ambiguous_start = None
+            continue
+        if ambiguous_start is None:
+            ambiguous_start = index
+        opposite_confirmed = (current_sign > 0 and value <= -high) or (current_sign < 0 and value >= high)
+        if opposite_confirmed:
+            exit_index = max(ambiguous_start - 1, 0)
+            boundary = (float(arc_distances[exit_index]) + float(arc_distances[index])) / 2.0
+            boundaries.append(boundary)
+            current_sign = -current_sign
+            ambiguous_start = None
+    return boundaries
 
 
 def score_run(
@@ -1355,6 +1552,20 @@ def _empty_external_angle_sum_metrics(branch_length: float = 0.0, chord_length: 
     }
 
 
+def _empty_grisan_metrics(
+    segment_count: int = 0,
+    inflection_count: int = 0,
+    valid: bool = False,
+) -> dict[str, float | bool]:
+    return {
+        "grisan_score": math.nan,
+        "grisan_segment_count": float(segment_count),
+        "grisan_inflection_count": float(inflection_count),
+        "grisan_excess_sum": math.nan,
+        "grisan_valid": bool(valid),
+    }
+
+
 def _category_score(branches: pd.DataFrame, category: str) -> float:
     subset = branches[branches["category"] == category]
     if subset.empty:
@@ -1438,6 +1649,7 @@ def parse_args() -> argparse.Namespace:
             "curvature_squared",
             "tortuosity_density",
             "external_angle_sum",
+            "grisan",
         ],
         default="local_bump",
     )

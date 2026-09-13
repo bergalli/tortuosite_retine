@@ -53,7 +53,7 @@ So the final method does **not** score the whole skeleton directly. The whole-sk
 - The Streamlit `Results` tab uses the active saved-vessel scoring method.
 - The PDF report uses the same active saved-vessel scoring method.
 - The CLI `tortuosite_score.vessels_detection.local_bump_score` accepts `--method` and uses the same centralized scoring service.
-- `Local-bump v2 (experimental)`, `Arc/chord`, `Courbure quadratique`, `Tortuosity Density`, and `Somme des angles externes (RDP)` can also be selected as primary methods; `Arc/chord` remains available as a diagnostic column.
+- `Local-bump v2 (experimental)`, `Arc/chord`, `Courbure quadratique`, `Tortuosity Density`, `Somme des angles externes (RDP)`, and `Grisan (2008)` can also be selected as primary methods; `Arc/chord` remains available as a diagnostic column.
 
 ## Scoring method
 
@@ -239,12 +239,31 @@ This metric measures the number of turns and how sharp each turn is (close to th
 
 The eye-level score is the length-weighted mean across eligible saved vessels, with no upper-tail component and no display multiplier, exactly like the curvature-squared and Tortuosity Density scores above.
 
+### Optional Grisan score
+
+The app also implements the original formula from Grisan, Foracchia and Ruggeri, "A Novel Method for the Automatic Grading of Retinal Vessel Tortuosity," IEEE Transactions on Medical Imaging 27(3), 2008 (eq. 19), as a method distinct from `Tortuosity Density` above. The normalized vessel is divided into \(n\) subsegments whose curvature has constant sign:
+
+\[
+\tau_{\mathrm{Grisan}}=\frac{n-1}{n}\cdot\frac{1}{L}\sum_{i=1}^{n}\left(\frac{L_i}{C_i}-1\right)
+\]
+
+where \(L\) is the total vessel length, \(L_i\) is the arc length of subsegment \(i\), and \(C_i\) is its chord. Two things are done differently from `Tortuosity Density` to follow the paper more closely:
+
+- The centerline is smoothed with a cubic smoothing spline (rather than a box-filter moving average), and \(L\), \(L_i\), and \(C_i\) are all measured **on that smoothed spline curve**, matching the paper's own preprocessing (Sec. IV-B) rather than the raw, unsmoothed geometry.
+- Curvature-sign changes are confirmed with a two-band hysteresis threshold (a low and a high curvature magnitude) instead of a single hard threshold, so that small noise-driven chatter near zero curvature does not fragment the vessel into spurious turn curves.
+- The formula itself includes the \((n-1)/n\) factor from eq. (19), which `Tortuosity Density`'s formula above omits.
+
+A vessel with no confirmed change of curvature sign has \(n=1\) and therefore scores zero, matching the paper's stated special case.
+
+The eye-level Grisan score is the length-weighted mean across eligible saved vessels. It has no upper-tail component and no display multiplier.
+
 The current report score is project-specific and cohort-relative:
 
 - `Score local-bump`: final saved-vessel local-bump eye score.
 - `Score courbure^2`: optional raw curvature-squared eye score when that method is active.
 - `Score Tortuosity Density`: optional raw Tortuosity Density eye score when that method is active.
 - `Score somme des angles externes`: optional raw external-angle-sum eye score (\(T\), in degrees) when that method is active.
+- `Score Grisan`: optional raw Grisan eye score when that method is active.
 - `Score moyen`: length-weighted mean saved-vessel local-bump burden.
 - `Queue superieure`: upper-tail saved-vessel burden.
 - `Score comparatif`: cohort-normalized `Score local-bump`.

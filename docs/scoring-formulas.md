@@ -8,10 +8,11 @@ skeleton. Geometry is normalized to a common fundus diameter, vessels shorter
 than the configured threshold are excluded, and the remaining vessel scores are
 aggregated at eye level.
 
-The six implemented primary methods are Local-bump v1, Local-bump v2,
-Arc/chord, curvature-squared, Tortuosity Density, and the RDP external-angle
-sum. Only Local-bump v1 uses an upper-tail component and a separate display
-multiplier at eye level. All other methods use a simple length-weighted mean.
+The seven implemented primary methods are Local-bump v1, Local-bump v2,
+Arc/chord, curvature-squared, Tortuosity Density, the RDP external-angle
+sum, and Grisan. Only Local-bump v1 uses an upper-tail component and a
+separate display multiplier at eye level. All other methods use a simple
+length-weighted mean.
 
 ## Common geometry and notation
 
@@ -269,6 +270,59 @@ S_{\mathrm{eye}}=
 There is no upper-tail component and no display multiplier. The result is in
 degrees.
 
+## 7. Grisan method
+
+This method implements eq. (19) of Grisan, Foracchia and Ruggeri, "A Novel
+Method for the Automatic Grading of Retinal Vessel Tortuosity," IEEE
+Transactions on Medical Imaging 27(3), 2008. It is deliberately kept separate
+from the pre-existing Tortuosity Density method above: Tortuosity Density
+approximates the same idea but omits the paper's \((n-1)/n\) factor and
+measures segment lengths on the raw, unsmoothed geometry, whereas Grisan
+follows the paper's own preprocessing choices (Sec. IV-B).
+
+The normalized centreline is fit with a parametric cubic smoothing spline
+(`scipy.interpolate.splprep`, smoothing factor \(s\)) and densely resampled.
+Curvature is evaluated analytically from the spline's derivatives with
+formula (8) of the paper:
+
+\[
+\kappa(l)=\frac{x'(l)y''(l)-y'(l)x''(l)}{\left(x'(l)^2+y'(l)^2\right)^{3/2}}.
+\]
+
+The vessel is split into turn curves at curvature-sign changes located with a
+two-band hysteresis (low threshold \(\tau_{\mathrm{low}}\), high threshold
+\(\tau_{\mathrm{high}}\)): a sign is only confirmed once \(|\kappa|\geq
+\tau_{\mathrm{high}}\), and it only flips once the opposite sign also reaches
+\(\tau_{\mathrm{high}}\), so chatter that stays within \(\tau_{\mathrm{low}}\)
+of zero is ignored. This is the arc-length analogue of Fig. 6 in the paper,
+which only shows a figure rather than pseudocode for the boundary rule.
+
+If the boundaries create \(n\) constant-sign subsegments, with arc length
+\(L_i\) and chord \(C_i\) **measured on the smoothed spline curve**, and
+\(L\) the spline's total arc length, the vessel score is
+
+\[
+\tau_{\mathrm{Grisan}}=
+\frac{n-1}{n}\cdot\frac{1}{L}\sum_{i=1}^{n}\left(\frac{L_i}{C_i}-1\right).
+\]
+
+No confirmed sign change gives \(n=1\) and therefore
+\(\tau_{\mathrm{Grisan}}=0\), matching the paper's stated special case. A
+subsegment with zero arc or chord makes the metric invalid. The eye score is
+
+\[
+S_{\mathrm{eye}}=
+\frac{\sum_{v\in V}L_v\,\tau_{\mathrm{Grisan},v}}{\sum_{v\in V}L_v}.
+\]
+
+There is no upper-tail component and no display multiplier. The unit is
+inverse normalized pixels. The spline smoothing factor and the two hysteresis
+thresholds are absolute values tuned for this app's normalized-pixel scale
+(vessels are always normalized to a 1024 px reference fundus diameter before
+scoring, see "Common geometry and notation" above); unlike a pure ratio such
+as arc/chord, they are not claimed to be scale-invariant on arbitrary raw
+pixel geometry.
+
 ## Cohort-relative comparative score
 
 For every primary method, a report cohort with finite eye scores \(S_j\) also
@@ -296,6 +350,7 @@ This is a cohort rank aid, not an absolute clinical threshold.
 | Curvature-squared | `curvature_squared_metrics` | straight-line, circular-arc, and resampling tests |
 | Tortuosity Density | `tortuosity_density_metrics` | hand-calculated, no-inflection, and invalid-geometry tests |
 | External-angle sum | `rdp_simplify`, `external_angle_sum_metrics` | straight-line and 180-degree staircase tests |
+| Grisan | `grisan_metrics`, `_fit_smoothing_spline`, `_hysteresis_sign_boundaries` | no-inflection, multi-turn-curve, noise-chatter-vs-tortuosity_density, and invalid-geometry tests |
 | Eye aggregation | `scoring.summarize_eye_score` | method-specific aggregation tests |
 | Comparative score | `add_comparative_hybrid_score`, `minmax_series` | formula inspection and full test suite |
 
@@ -313,3 +368,8 @@ also corrected to remove a smoothing step that is absent from the calculation.
 - The comparative score changes when the report cohort changes.
 - Local-bump v2 is explicitly experimental and remains separate from the default
   Local-bump v1 method.
+- Grisan's hysteresis boundary rule and cubic-smoothing-spline preprocessing are a
+  documented, reasonable-faith reimplementation of Sec. IV-B and Fig. 6 of the 2008
+  paper, not a byte-exact reproduction: the paper only shows a figure, not published
+  code, and its MATLAB smoothing-spline regularization parameter is not numerically
+  the same knob as this implementation's `scipy` smoothing factor.

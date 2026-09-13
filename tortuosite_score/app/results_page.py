@@ -102,6 +102,16 @@ EXTERNAL_ANGLE_SUM_METHOD_EXPLANATION = (
     "degres. La metrique compte donc le nombre de virages et leur amplitude, sans dependre directement de la "
     "longueur du vaisseau ni du rayon de courbure."
 )
+GRISAN_METHOD_EXPLANATION = (
+    "Le score actuel est calcule uniquement sur les vaisseaux sauvegardes. Il implemente fidelement la formule "
+    "originale de Grisan, Foracchia et Ruggeri (2008): la ligne centrale normalisee est lissee par une spline "
+    "cubique de lissage, la courbure signee kappa(l) est calculee le long de cette spline, puis le vaisseau est "
+    "decoupe en sous-segments de courbure de signe constant en confirmant chaque changement de signe par un seuil "
+    "d'hysteresis (deux seuils, bas et haut) afin d'ignorer le bruit de mesure. La longueur d'arc et la corde de "
+    "chaque sous-segment sont mesurees sur la spline lissee elle-meme, comme dans le papier original. Cette methode "
+    "differe de Tortuosity Density: elle mesure sur la geometrie lissee plutot que sur la geometrie brute, et "
+    "applique le facteur (n - 1) / n de la formule (19) du papier."
+)
 HYBRID_SCORE_EXPLANATION = (
     "Le score final de l'oeil combine une moyenne des vaisseaux sauvegardes ponderee par la longueur et une composante "
     "de queue superieure pour que quelques vaisseaux tres bossues ne soient pas dilues par de nombreux vaisseaux "
@@ -162,6 +172,11 @@ MODEL_DESCRIPTION_BY_METHOD = {
         "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
         "Pour chaque vaisseau, il re-echantillonne et lisse la ligne centrale, mesure les changements locaux d'angle, ignore les variations sous le seuil actif, puis compte les alternances de courbure.",
         "Le score est concu pour valoriser les petites bosses et oscillations locales plutot qu'un grand virage regulier unique.",
+    ],
+    "grisan": [
+        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
+        "Il lisse la ligne centrale normalisee avec une spline cubique de lissage, puis calcule la courbure signee le long de cette spline.",
+        "Il decoupe le vaisseau en sous-segments de courbure de signe constant par hysteresis (deux seuils) et applique tau_Grisan = ((n - 1) / n) x (1 / L) x somme(L_i / C_i - 1) sur la geometrie lissee.",
     ],
 }
 
@@ -845,6 +860,7 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
         "curvature_squared": CURVATURE_SQUARED_METHOD_EXPLANATION,
         "tortuosity_density": TORTUOSITY_DENSITY_METHOD_EXPLANATION,
         "external_angle_sum": EXTERNAL_ANGLE_SUM_METHOD_EXPLANATION,
+        "grisan": GRISAN_METHOD_EXPLANATION,
     }.get(method.method_id, LOCAL_BUMP_METHOD_EXPLANATION)
     ax.text(0.08, 0.88, explanation, va="top", fontsize=10, wrap=True)
     steps = list(method.report_steps)
@@ -874,6 +890,13 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
         steps[2] = f"3. Normaliser le diametre du fond d'oeil a 1024 px, puis exclure les vaisseaux sous {settings.min_saved_vessel_length:.0f} px normalises."
         steps[3] = f"4. Simplifier la ligne centrale avec Ramer-Douglas-Peucker (tolerance {settings.rdp_epsilon:.1f} px normalises)."
         steps[4] = "5. Calculer l'angle externe (en degres) a chaque point de flexion conserve."
+    elif method.method_id == "grisan":
+        steps[2] = f"3. Normaliser le diametre du fond d'oeil a 1024 px, puis exclure les vaisseaux sous {settings.min_saved_vessel_length:.0f} px normalises."
+        steps[3] = f"4. Lisser la ligne centrale avec une spline cubique de lissage (parametre s={settings.grisan_spline_smoothing:.1f})."
+        steps[5] = (
+            "6. Diviser en sous-segments par hysteresis sur le signe de la courbure "
+            f"(seuils bas={settings.grisan_curvature_hysteresis_low:.4f}, haut={settings.grisan_curvature_hysteresis_high:.4f})."
+        )
     ax.text(0.08, 0.62, "\n".join(steps), va="top", fontsize=10)
     aggregation_explanation = HYBRID_SCORE_EXPLANATION if method.method_id == "local_bump" else LENGTH_WEIGHTED_SCORE_EXPLANATION
     ax.text(0.08, 0.34, aggregation_explanation, va="top", fontsize=9, wrap=True)

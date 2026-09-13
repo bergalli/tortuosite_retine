@@ -15,6 +15,7 @@ from tortuosite_score.vessels_detection.local_bump_score import (
     LocalBumpSettings,
     curvature_squared_metrics,
     external_angle_sum_metrics,
+    grisan_metrics,
     local_bump_metrics,
     local_bump_v2_metrics,
     rdp_simplify,
@@ -237,6 +238,62 @@ class LocalBumpMetricTests(unittest.TestCase):
         self.assertEqual(duplicate_score["external_angle_sum_score"], 0.0)
         self.assertTrue(math.isfinite(short_score["external_angle_sum_score"]))
 
+    def test_grisan_is_zero_without_an_inflection(self) -> None:
+        straight = grisan_metrics([[x, 0.0] for x in np.linspace(0, 200, 40)])
+        theta = np.linspace(0.0, math.pi / 2.0, 100)
+        arc = grisan_metrics(np.column_stack([50.0 * np.cos(theta), 50.0 * np.sin(theta)]))
+
+        for metrics in (straight, arc):
+            self.assertTrue(bool(metrics["grisan_valid"]))
+            self.assertEqual(metrics["grisan_segment_count"], 1.0)
+            self.assertEqual(metrics["grisan_inflection_count"], 0.0)
+            self.assertAlmostEqual(float(metrics["grisan_score"]), 0.0, places=6)
+
+    def test_grisan_detects_multiple_turn_curves_on_a_sinusoid(self) -> None:
+        l = np.linspace(0.0, 2.0 * 2.0 * math.pi, 400)
+        points = np.column_stack([l * 20.0, 20.0 * np.sin(l)])
+
+        metrics = grisan_metrics(points)
+
+        self.assertTrue(bool(metrics["grisan_valid"]))
+        self.assertEqual(metrics["grisan_segment_count"], 4.0)
+        self.assertEqual(metrics["grisan_inflection_count"], 3.0)
+        self.assertGreater(float(metrics["grisan_score"]), 0.0)
+
+    def test_grisan_ignores_small_noise_chatter_that_tortuosity_density_over_splits(self) -> None:
+        rng = np.random.default_rng(0)
+        l = np.linspace(0.0, 300.0, 200)
+        jitter = 0.3 * np.sin(l * 5.0) + rng.normal(0.0, 0.05, size=l.shape)
+        noisy_near_straight_line = np.column_stack([l, jitter])
+        settings = LocalBumpSettings()
+
+        grisan_result = grisan_metrics(noisy_near_straight_line, settings)
+        density_result = tortuosity_density_metrics(noisy_near_straight_line, settings)
+
+        self.assertTrue(bool(grisan_result["grisan_valid"]))
+        self.assertEqual(grisan_result["grisan_segment_count"], 1.0)
+        self.assertAlmostEqual(float(grisan_result["grisan_score"]), 0.0, places=6)
+        # The single hard threshold used by tortuosity_density over-splits this same
+        # sub-pixel jitter into many spurious segments; grisan's two-band hysteresis does not.
+        self.assertGreater(float(density_result["constant_curvature_segment_count"]), 10.0)
+
+    def test_grisan_rejects_zero_chord_geometry(self) -> None:
+        closed_curve = [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]
+
+        metrics = grisan_metrics(closed_curve, LocalBumpSettings())
+
+        self.assertFalse(bool(metrics["grisan_valid"]))
+        self.assertTrue(math.isnan(float(metrics["grisan_score"])))
+
+    def test_grisan_short_or_degenerate_paths_return_safe_defaults(self) -> None:
+        short_score = grisan_metrics([[0, 0], [1, 1], [2, 0]])
+        duplicate_score = grisan_metrics([[0, 0], [0, 0], [0, 0], [0, 0]])
+
+        self.assertFalse(bool(short_score["grisan_valid"]))
+        self.assertTrue(math.isnan(float(short_score["grisan_score"])))
+        self.assertFalse(bool(duplicate_score["grisan_valid"]))
+        self.assertTrue(math.isnan(float(duplicate_score["grisan_score"])))
+
     def test_eye_summary_uses_tail_component(self) -> None:
         systems = pd.DataFrame(
             {
@@ -422,6 +479,7 @@ class CentralScoringServiceTests(unittest.TestCase):
             "curvature_squared",
             "tortuosity_density",
             "external_angle_sum",
+            "grisan",
         ):
             equations = scoring_method_spec(method_id).report_equations
             self.assertTrue(any("S_oeil =" in equation for equation in equations), method_id)
@@ -442,6 +500,7 @@ class CentralScoringServiceTests(unittest.TestCase):
                 "curvature_squared",
                 "tortuosity_density",
                 "external_angle_sum",
+                "grisan",
             },
         )
 
@@ -463,6 +522,7 @@ class CentralScoringServiceTests(unittest.TestCase):
         curvature_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("curvature_squared"))
         density_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("tortuosity_density"))
         angle_sum_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("external_angle_sum"))
+        grisan_score = score_saved_vessel(segment_map, "v1", vessel, config=scoring_config("grisan"))
 
         self.assertEqual(arc_score["scoring_method"], "arc_chord")
         self.assertEqual(bump_score["scoring_method"], "local_bump")
@@ -470,6 +530,7 @@ class CentralScoringServiceTests(unittest.TestCase):
         self.assertEqual(curvature_score["scoring_method"], "curvature_squared")
         self.assertEqual(density_score["scoring_method"], "tortuosity_density")
         self.assertEqual(angle_sum_score["scoring_method"], "external_angle_sum")
+        self.assertEqual(grisan_score["scoring_method"], "grisan")
         self.assertAlmostEqual(float(arc_score["arc_chord_diagnostic"]), float(arc_score["primary_score"]))
         self.assertGreater(float(bump_score["local_bump_score"]), 0.0)
         self.assertAlmostEqual(float(bump_v2_score["local_bump_v2_score"]), float(bump_v2_score["primary_score"]))
@@ -486,6 +547,11 @@ class CentralScoringServiceTests(unittest.TestCase):
             float(angle_sum_score["primary_score"]),
         )
         self.assertGreater(float(angle_sum_score["primary_score"]), 0.0)
+        self.assertAlmostEqual(
+            float(grisan_score["grisan_score"]),
+            float(grisan_score["primary_score"]),
+        )
+        self.assertGreater(float(grisan_score["primary_score"]), 0.0)
 
     def test_coordinate_normalization_makes_scaled_geometry_comparable(self) -> None:
         def score_for(points: list[list[float]], scale: float) -> dict[str, object]:
@@ -580,6 +646,40 @@ class CentralScoringServiceTests(unittest.TestCase):
             places=6,
         )
 
+    def test_grisan_uses_normalized_geometry(self) -> None:
+        def score_for(points: list[list[float]], scale: float) -> dict[str, object]:
+            segment = VesselSegment.from_manual_points(1, points)
+            segment_map = build_segment_map(pd.DataFrame(), {"1": segment.to_manual_payload()})
+            vessel = {
+                "category": "artere",
+                "segment_refs": [segment.ref],
+                "synthetic_links": [],
+                "start_endpoint": {"kind": "geometry_point", "point": points[0], "segment_ref": segment.ref},
+                "end_endpoint": {"kind": "geometry_point", "point": points[-1], "segment_ref": segment.ref},
+            }
+            return score_saved_vessel(
+                segment_map,
+                "v1",
+                vessel,
+                config=scoring_config("grisan"),
+                coordinate_scale=scale,
+            )
+
+        base = [[0, 0], [40, 40], [80, 0], [120, -40], [160, 0]]
+        enlarged = [[4 * x, 4 * y] for x, y in base]
+
+        # score_saved_vessel multiplies raw points by coordinate_scale before scoring, so an
+        # image captured at 4x resolution (coordinate_scale=0.25) lands on the same normalized
+        # geometry as the base image and must produce the same primary_score. Unlike
+        # tortuosity_density, grisan's spline smoothing and hysteresis thresholds are absolute
+        # (tuned for the app's normalized-pixel scale), so this equivalence -- not a general
+        # raw-geometry scale invariance -- is the property that matters here.
+        self.assertAlmostEqual(
+            float(score_for(base, 1.0)["primary_score"]),
+            float(score_for(enlarged, 0.25)["primary_score"]),
+            places=6,
+        )
+
     def test_local_bump_v2_uses_normalized_geometry(self) -> None:
         def score_for(points: list[list[float]], scale: float) -> dict[str, object]:
             segment = VesselSegment.from_manual_points(1, points)
@@ -620,6 +720,23 @@ class CentralScoringServiceTests(unittest.TestCase):
         )
 
         summary = summarize_saved_eye_score(vessel_scores, scoring_config("tortuosity_density"))
+
+        self.assertAlmostEqual(float(summary["eye_tortuosity_score"]), 2.5)
+        self.assertAlmostEqual(float(summary["all_vessels_score"]), 2.5)
+        self.assertTrue(math.isnan(float(summary["all_vessels_tail_score"])))
+
+    def test_grisan_eye_summary_is_length_weighted_without_tail_or_scale(self) -> None:
+        vessel_scores = pd.DataFrame(
+            {
+                "eligible": [True, True],
+                "primary_score": [1.0, 3.0],
+                "vessel_length": [10.0, 30.0],
+                "arc_chord_diagnostic": [1.0, 1.2],
+                "category": ["artere", "veine"],
+            }
+        )
+
+        summary = summarize_saved_eye_score(vessel_scores, scoring_config("grisan"))
 
         self.assertAlmostEqual(float(summary["eye_tortuosity_score"]), 2.5)
         self.assertAlmostEqual(float(summary["all_vessels_score"]), 2.5)
@@ -731,6 +848,7 @@ class CentralScoringServiceTests(unittest.TestCase):
         density_parameters = dict(scoring_method_fixed_parameters(scoring_config("tortuosity_density")))
         v2_parameters = dict(scoring_method_fixed_parameters(scoring_config("local_bump_v2")))
         angle_sum_parameters = dict(scoring_method_fixed_parameters(scoring_config("external_angle_sum")))
+        grisan_parameters = dict(scoring_method_fixed_parameters(scoring_config("grisan")))
 
         self.assertIn("Seuil de courbure locale", local_bump_parameters)
         self.assertIn("Pas de re-echantillonnage", local_bump_parameters)
@@ -767,6 +885,15 @@ class CentralScoringServiceTests(unittest.TestCase):
                 "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
                 "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
                 "Tolerance de simplification RDP": "3.0 px normalises",
+            },
+        )
+        self.assertEqual(
+            grisan_parameters,
+            {
+                "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
+                "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
+                "Lissage de la spline cubique": "s=20.0",
+                "Seuils d'hysteresis sur la courbure": "bas=0.0100, haut=0.0300",
             },
         )
 
