@@ -68,25 +68,79 @@ class LocalBumpSettings:
     grisan_curvature_hysteresis_high: float = DEFAULT_GRISAN_HYSTERESIS_HIGH
 
 
+@dataclass(frozen=True)
+class LocalBumpDiagnostics:
+    """Inspectable intermediate values for the Local-bump v1 computation.
+
+    ``geometry`` is expressed in the coordinate system supplied by the caller.
+    Saved-vessel scoring passes fundus-normalized coordinates here, while tests
+    and synthetic callers may intentionally use another coordinate system.
+    """
+
+    geometry: np.ndarray
+    resampled: np.ndarray
+    smoothed: np.ndarray
+    arc_distance: np.ndarray
+    segment_directions: np.ndarray
+    angle_change: np.ndarray
+    filtered_angle_change: np.ndarray
+    sign_change_indices: np.ndarray
+    metrics: dict[str, float]
+
+
 def local_bump_metrics(
     points: list[list[float]] | np.ndarray,
     settings: LocalBumpSettings | None = None,
 ) -> dict[str, float]:
+    return local_bump_diagnostics(points, settings).metrics
+
+
+def local_bump_diagnostics(
+    points: list[list[float]] | np.ndarray,
+    settings: LocalBumpSettings | None = None,
+) -> LocalBumpDiagnostics:
+    """Return the exact Local-bump v1 score inputs and intermediate arrays."""
+
     settings = settings or LocalBumpSettings()
     path = _prepare_path(points)
     if len(path) < 2:
-        return _empty_branch_metrics()
+        return _empty_local_bump_diagnostics(path, _empty_branch_metrics())
 
     branch_length = polyline_length(path)
     chord_length = float(np.linalg.norm(path[-1] - path[0]))
     if branch_length <= 0:
-        return _empty_branch_metrics(branch_length=branch_length, chord_length=chord_length)
+        return _empty_local_bump_diagnostics(
+            path,
+            _empty_branch_metrics(branch_length=branch_length, chord_length=chord_length),
+        )
 
     resampled = resample_polyline(path, settings.resample_step)
     smoothed = smooth_polyline(resampled, settings.smoothing_window)
+    segment_directions = (
+        np.unwrap(np.arctan2(np.diff(smoothed[:, 1]), np.diff(smoothed[:, 0])))
+        if len(smoothed) >= 2
+        else np.asarray([], dtype=float)
+    )
     angle_change = local_angle_change(smoothed)
+    cumulative = np.concatenate(
+        [[0.0], np.cumsum(np.linalg.norm(np.diff(resampled, axis=0), axis=1))]
+    )
+    arc_distance = cumulative[1:-1] if len(cumulative) >= 3 else np.asarray([], dtype=float)
     if angle_change.size == 0:
-        return _empty_branch_metrics(branch_length=branch_length, chord_length=chord_length)
+        return LocalBumpDiagnostics(
+            geometry=path,
+            resampled=resampled,
+            smoothed=smoothed,
+            arc_distance=arc_distance,
+            segment_directions=segment_directions,
+            angle_change=angle_change,
+            filtered_angle_change=np.asarray([], dtype=float),
+            sign_change_indices=np.asarray([], dtype=int),
+            metrics=_empty_branch_metrics(
+                branch_length=branch_length,
+                chord_length=chord_length,
+            ),
+        )
 
     meaningful = np.where(np.abs(angle_change) >= settings.curvature_threshold, angle_change, 0.0)
     local_bump_energy = float(np.mean(np.abs(meaningful)))
@@ -94,8 +148,16 @@ def local_bump_metrics(
     oscillation_density = float(oscillation_count / branch_length * 100.0)
     branch_bump_score = float(local_bump_energy * math.sqrt(oscillation_density)) if oscillation_density > 0 else 0.0
     arc_chord_tortuosity = float(branch_length / chord_length) if chord_length > 0 else math.nan
-
-    return {
+    nonzero_indices = np.flatnonzero(meaningful)
+    sign_change_indices = np.asarray(
+        [
+            int(current)
+            for previous, current in zip(nonzero_indices[:-1], nonzero_indices[1:])
+            if np.sign(meaningful[previous]) != np.sign(meaningful[current])
+        ],
+        dtype=int,
+    )
+    metrics = {
         "branch_length": float(branch_length),
         "chord_length": chord_length,
         "arc_chord_tortuosity": arc_chord_tortuosity,
@@ -104,6 +166,36 @@ def local_bump_metrics(
         "oscillation_density": oscillation_density,
         "branch_bump_score": branch_bump_score,
     }
+    return LocalBumpDiagnostics(
+        geometry=path,
+        resampled=resampled,
+        smoothed=smoothed,
+        arc_distance=arc_distance,
+        segment_directions=segment_directions,
+        angle_change=angle_change,
+        filtered_angle_change=meaningful,
+        sign_change_indices=sign_change_indices,
+        metrics=metrics,
+    )
+
+
+def _empty_local_bump_diagnostics(
+    geometry: np.ndarray,
+    metrics: dict[str, float],
+) -> LocalBumpDiagnostics:
+    empty_points = np.empty((0, 2), dtype=float)
+    empty_values = np.asarray([], dtype=float)
+    return LocalBumpDiagnostics(
+        geometry=np.asarray(geometry, dtype=float),
+        resampled=empty_points,
+        smoothed=empty_points,
+        arc_distance=empty_values,
+        segment_directions=empty_values,
+        angle_change=empty_values,
+        filtered_angle_change=empty_values,
+        sign_change_indices=np.asarray([], dtype=int),
+        metrics=metrics,
+    )
 
 
 def local_bump_v2_metrics(

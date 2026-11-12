@@ -13,6 +13,52 @@ Without `skan`, skeleton tortuosity uses a built-in scikit-image graph fallback 
 The code-audited mathematical reference for every available method is
 [`docs/scoring-formulas.md`](docs/scoring-formulas.md).
 
+Generate the French paper figure for the VascX extraction workflow and the
+multipage Local-bump v1 atlas from the saved, numbered cohort (VascX is not
+rerun):
+
+```bash
+uv run python analysis/generate_method_visualizations.py \
+  --runs-root demo/streamlit_runs \
+  --output-dir paper_visualisations \
+  --pipeline-run 2_OD
+```
+
+The command writes `pipeline_extraction_2_OD.pdf`, `explication_local_bump.pdf`
+(both with 300 dpi PNG previews), and `atlas_local_bump_veines.pdf`. The overview
+explains the median-score vein and compares the minimum, median and maximum
+eligible scores. The atlas includes every score-eligible ranked publication
+vein once, with angles and numbered sign changes drawn on the real images,
+numeric formulas, and a separate note about the actual all-saved-vessel
+eye-score aggregation. No graphs or individual vein files are generated.
+The extraction figure is a sequence of 12 equally sized image panels, read
+left to right, from preparation and saved VascX outputs to manual correction,
+labelling and publication export. Filenames identify the saved outputs, and
+captions distinguish diagnostic views from actual model inputs. VascX receives
+RGB, and the fundus mask restricts its predictions after inference.
+The atlas opens with a standalone French explanation of every formula term;
+red/blue/grey legends match retained positive/negative/discarded image samples.
+
+Generate the corresponding artery atlas and the artery extraction figures for
+every numbered eye with the same renderer and Local-bump v1 computation:
+
+```bash
+uv run python analysis/generate_method_visualizations.py \
+  --runs-root demo/streamlit_runs \
+  --output-dir paper_visualisations \
+  --vessel-type artere \
+  --pipeline-run all
+```
+
+This writes `atlas_local_bump_arteres.pdf`, `explication_local_bump_arteres.pdf`
+and its PNG preview, and `pipeline_extraction_arteres_<eye>.pdf` / `.png` for
+each eye. Arteries must pass the existing classified export rule, have a name
+of rank 1–3, and have an eligible finite Local-bump score. Their final overlays
+use `1°A`, `2°A`, `3°A`; curvature signs keep the same red/blue/grey convention.
+The eye score still includes all eligible saved arteries and veins. The default
+`--vessel-type veine` retains the original filenames; `--pipeline-run all` also
+works for veins.
+
 Compute the saved-vessel tortuosity score from already saved Streamlit/VascX runs:
 
 ```bash
