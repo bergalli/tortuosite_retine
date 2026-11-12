@@ -837,9 +837,9 @@ class CentralScoringServiceTests(unittest.TestCase):
         review_table = build_review_scores_table(branches, review_state, config=scoring_config("curvature_squared"))
         export_df = build_manual_vessels_export(branches, review_state, config=scoring_config("curvature_squared"))
 
-        self.assertEqual(review_table.loc[0, "Methode"], "Courbure quadratique")
+        self.assertEqual(review_table.loc[0, "Methode"], "Squared curvature")
         self.assertEqual(export_df.loc[0, "scoring_method"], "curvature_squared")
-        self.assertEqual(export_df.loc[0, "primary_score_label"], "Score courbure^2")
+        self.assertEqual(export_df.loc[0, "primary_score_label"], "Squared curvature score")
         self.assertIn("curvature_squared_score", export_df.columns)
 
     def test_fixed_parameters_are_exposed_per_scoring_method(self) -> None:
@@ -851,50 +851,50 @@ class CentralScoringServiceTests(unittest.TestCase):
         angle_sum_parameters = dict(scoring_method_fixed_parameters(scoring_config("external_angle_sum")))
         grisan_parameters = dict(scoring_method_fixed_parameters(scoring_config("grisan")))
 
-        self.assertIn("Seuil de courbure locale", local_bump_parameters)
-        self.assertIn("Pas de re-echantillonnage", local_bump_parameters)
+        self.assertIn("Local curvature threshold", local_bump_parameters)
+        self.assertIn("Resampling step", local_bump_parameters)
         self.assertEqual(
             curvature_parameters,
             {
-                "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
-                "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
-                "Pretraitement re-echantillonnage": "actif, pas 4.0 px",
+                "Geometry normalization": "fundus diameter normalized to 1024 px",
+                "Short vessel filter": "enabled, minimum length 100 normalized px",
+                "Resampling preprocessing": "enabled, step 4.0 px",
             },
         )
         self.assertEqual(
             arc_chord_parameters,
             {
-                "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
-                "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
+                "Geometry normalization": "fundus diameter normalized to 1024 px",
+                "Short vessel filter": "enabled, minimum length 100 normalized px",
             },
         )
         self.assertEqual(
             density_parameters,
             {
-                "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
-                "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
-                "Pas de re-echantillonnage": "4.0 px",
-                "Fenetre de lissage": "5 points",
-                "Seuil d'inflexion": "0.035 rad",
+                "Geometry normalization": "fundus diameter normalized to 1024 px",
+                "Short vessel filter": "enabled, minimum length 100 normalized px",
+                "Resampling step": "4.0 px",
+                "Smoothing window": "5 points",
+                "Inflection threshold": "0.035 rad",
             },
         )
-        self.assertEqual(v2_parameters["Angle minimal d'un lobe persistant"], "0.150 rad")
-        self.assertEqual(v2_parameters["Poids de l'angularite"], "0.25")
+        self.assertEqual(v2_parameters["Minimum persistent lobe angle"], "0.150 rad")
+        self.assertEqual(v2_parameters["Angularity weight"], "0.25")
         self.assertEqual(
             angle_sum_parameters,
             {
-                "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
-                "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
-                "Tolerance de simplification RDP": "3.0 px normalises",
+                "Geometry normalization": "fundus diameter normalized to 1024 px",
+                "Short vessel filter": "enabled, minimum length 100 normalized px",
+                "RDP simplification tolerance": "3.0 normalized px",
             },
         )
         self.assertEqual(
             grisan_parameters,
             {
-                "Normalisation geometrie": "diametre du fond d'oeil ramene a 1024 px",
-                "Filtre petits vaisseaux": "actif, longueur minimale 100 px normalises",
-                "Lissage de la spline cubique": "s=20.0",
-                "Seuils d'hysteresis sur la courbure": "bas=0.0100, haut=0.0300",
+                "Geometry normalization": "fundus diameter normalized to 1024 px",
+                "Short vessel filter": "enabled, minimum length 100 normalized px",
+                "Cubic spline smoothing": "s=20.0",
+                "Curvature hysteresis thresholds": "low=0.0100, high=0.0300",
             },
         )
 

@@ -25,7 +25,7 @@ import numpy as np
 
 SOURCE_REVISION = "337a3f855f6900b6b1c51ecfbeaf8a291ce718c8"
 TIMEOUT_SECONDS = 30.0
-CACHE_VERSION = "batch-v1-diagnostics-3"
+CACHE_VERSION = "batch-v1-diagnostics-4"
 # Keys are stable public method suffixes; values are the original registry keys.
 METRICS = {
     "dm": "DM", "mean_curvature": "mean_curvature",
@@ -35,28 +35,28 @@ METRICS = {
 }
 FORMULAS = {
     "dm": "DM = L / C",
-    "mean_curvature": "M = moyenne(|kappa_i|) (moyenne des echantillons)",
-    "total_curvature": "TC = trapeze(|kappa|, s)",
-    "tau_3": "tau_3 = trapeze(kappa^2, s)",
+    "mean_curvature": "M = mean(|kappa_i|) (sample mean)",
+    "total_curvature": "TC = trapezoid(|kappa|, s)",
+    "tau_3": "tau_3 = trapezoid(kappa^2, s)",
     "tau_5": "tau_5 = tau_3 / L",
-    "asdc": "ASDC = trapeze(gradient(kappa)^2) / C (pas d'indice = 1)",
-    "icm": "ICM = DM x (nombre d'inflexions retenues + 1)",
-    "soam": "SOAM = somme(|diff(atan2(dy, dx) en degres)|) / L",
-    "td": "TD = ((n - 1) / n) x somme(exces retenus) / L",
-    "scc": "SCC = somme(|angles corriges / 180|)",
-    "escc": "ESCC = somme(|angles corriges / 180|) sur le trace ESCC",
+    "asdc": "ASDC = trapezoid(gradient(kappa)^2) / C (index step = 1)",
+    "icm": "ICM = DM x (number of accepted inflections + 1)",
+    "soam": "SOAM = sum(|diff(atan2(dy, dx) in degrees)|) / L",
+    "td": "TD = ((n - 1) / n) x sum(accepted excesses) / L",
+    "scc": "SCC = sum(|corrected angles / 180|)",
+    "escc": "ESCC = sum(|corrected angles / 180|) on the ESCC path",
 }
 DESCRIPTION = (
-    "Calcul Curve Toolkit sur les vaisseaux sauvegardes normalises. Recette batch : "
-    "lissage csaps avec p=8/L, ceil(N/4) points, puis parametrisation SCC. "
-    "Les formules et particularites du code source sont conservees."
+    "Curve Toolkit calculation on normalized saved vessels. Batch procedure: "
+    "csaps smoothing with p=8/L, ceil(N/4) points, then SCC parameterization. "
+    "Source code formulas and conventions are preserved."
 )
 PARAMETERS = (
     ("Source", SOURCE_REVISION),
-    ("Recette batch", "p=8/L; M=ceil(N/4); lissage M points puis SCC M points"),
-    ("Derivees csaps", "smooth=1.0; seuil ICM/TD=0.0001"),
-    ("Echecs", "NA avec motif; limite 30 s par operation"),
-    ("Aggregation app", "moyenne ponderee par longueur; aucun multiplicateur"),
+    ("Batch procedure", "p=8/L; M=ceil(N/4); smooth to M points then SCC with M points"),
+    ("csaps derivatives", "smooth=1.0; ICM/TD threshold=0.0001"),
+    ("Failures", "NA with reason; limit of 30 s per operation"),
+    ("App aggregation", "length-weighted mean; no multiplier"),
 )
 AUDIT_COLUMNS = [
     "toolkit_status", "toolkit_failure_reason", "toolkit_raw_status",
@@ -107,11 +107,11 @@ class _Worker:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0 or not select.select([self.process.stdout], [], [], remaining)[0]:
                         self.close()
-                        return _failure(f"Delai depasse ({timeout:g} s)", "timeout")
+                        return _failure(f"Time limit exceeded ({timeout:g} s)", "timeout")
                     chunk = os.read(self.process.stdout.fileno(), 65536)
                     if not chunk:
                         self.close()
-                        return _failure("Le processus toolkit s'est termine sans resultat")
+                        return _failure("The toolkit process exited without a result")
                     self.buffer += chunk
                 line, self.buffer = self.buffer.split(b"\n", 1)
                 return json.loads(line)
@@ -141,7 +141,7 @@ def _cached_call(payload: dict, timeout: float) -> dict:
         pass
     result = _WORKER.call(payload, timeout)
     # Cache only completed calculations. Transient process failures can be retried.
-    if result["status"] in {"ok", "non_finite"} or (result["status"] == "error" and result["reason"] != "Le processus toolkit s'est termine sans resultat"):
+    if result["status"] in {"ok", "non_finite"} or (result["status"] == "error" and result["reason"] != "The toolkit process exited without a result"):
         try:
             root.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(mode="w", dir=root, delete=False) as f:
@@ -175,7 +175,7 @@ def toolkit_metrics(points, method: str, *, timeout: float = TIMEOUT_SECONDS) ->
     try:
         array = np.asarray(points, dtype=float)
         if array.ndim != 2 or array.shape[1] != 2 or not np.isfinite(array).all():
-            return _failure("Coordonnees attendues: tableau N x 2 fini")
+            return _failure("Expected coordinates: finite N x 2 array")
         encoded = json.dumps(array.tolist())
         return copy.deepcopy(_metric_cached(encoded, metric, float(timeout)))
     except (ValueError, TypeError, importlib.metadata.PackageNotFoundError) as exc:

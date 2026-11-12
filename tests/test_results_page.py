@@ -61,6 +61,9 @@ class ResultsPageTests(unittest.TestCase):
                        and call.kwargs.get('file_name','').startswith('rapports_tortuosite_')]
             self.assertEqual(len(downloads),1)
             download=downloads[0]
+            self.assertTrue(any(call.args and call.args[0] ==
+                                'Download all 3 PDFs (report + arteries + veins)'
+                                for call in ui.download_button.call_args_list))
             self.assertTrue(callable(download['data']))
             self.assertEqual(download['on_click'],'ignore')
             self.assertEqual(download['data'](),b'zip')

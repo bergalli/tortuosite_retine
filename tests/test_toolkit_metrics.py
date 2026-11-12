@@ -192,15 +192,15 @@ class ToolkitIntegrationTests(unittest.TestCase):
         figure=_detail_page(records[0],config,1,len(records),3)
         text=' '.join(t.get_text() for t in figure.texts)
         self.assertIn(f"{records[0].name_info.rank}°V",text)
-        self.assertIn('cette veine',text)
-        self.assertNotIn('cette artère',text)
+        self.assertIn('this vein',text)
+        self.assertNotIn('this artery',text)
         class Capture:
             def savefig(self,figure,**kwargs):self.figure=figure
         capture=Capture()
         _cover(capture,config,records,excluded,vessel_type='veine')
         cover=' '.join(t.get_text() for t in capture.figure.texts)
-        self.assertIn('veines',cover)
-        self.assertIn('Atlas : veines',cover)
+        self.assertIn('veins',cover)
+        self.assertIn('Atlas: named rank 1–3 veins',cover)
         with self.assertRaises(ValueError):atlas_population(scored,vessel_type='invalid')
 
     def test_three_pdf_archive_contains_report_and_both_real_atlases(self):
@@ -208,7 +208,30 @@ class ToolkitIntegrationTests(unittest.TestCase):
         from tortuosite_score.app.results_page import generate_toolkit_pdf_archive, _build_local_bump_summary_table
         run=ROOT/'demo/streamlit_runs/1_OD';config=scoring_config('toolkit_dm')
         summary,table=score_run(run,config);scored=[(run,summary,table)]
-        archive=generate_toolkit_pdf_archive(scored,config,_build_local_bump_summary_table(scored))
+        # Inspect text artists from every rendered page, including charts and tables.
+        from matplotlib.backends.backend_pdf import PdfPages
+        from matplotlib.text import Text
+        page_text = []
+        savefig = PdfPages.savefig
+        def capture(pdf, figure, *args, **kwargs):
+            texts = [item.get_text() for item in figure.findobj(Text)]
+            for ax in figure.axes:
+                for table in ax.tables:
+                    texts.extend(cell.get_text().get_text() for cell in table.get_celld().values())
+            page_text.append(" ".join(" ".join(text.split()) for text in texts))
+            return savefig(pdf, figure, *args, **kwargs)
+        with patch.object(PdfPages, "savefig", capture):
+            archive=generate_toolkit_pdf_archive(scored,config,_build_local_bump_summary_table(scored))
+        text = " ".join(page_text)
+        for expected in ("Retinal tortuosity report", "Model and preprocessing",
+                         "Weighted mean", "Raw p-values", "BH-adjusted p-values",
+                         "Vessel", "Category", "artery", "vein",
+                         "Atlas: named rank 1–3 arteries", "Atlas: named rank 1–3 veins",
+                         "Numerical substitution", "Normalized x (px)"):
+            self.assertIn(expected, text)
+        for french in ("Rapport", "Vaisseau", "Categorie", "Methode", "moyenne",
+                       "courbure", "Tracé", "Fiche", "veines", "artères", "Motif"):
+            self.assertNotIn(french, text)
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
             self.assertIsNone(bundle.testzip())
             self.assertEqual(set(bundle.namelist()),{
@@ -248,7 +271,7 @@ class ToolkitIntegrationTests(unittest.TestCase):
         records,excluded=atlas_population([(run,summary,table)])
         self.assertEqual([r.row['primary_score'] for r in records],sorted(r.row['primary_score'] for r in records))
         self.assertTrue(all(r.name_info.vessel_type=='artere' for r in records))
-        self.assertTrue(any('A curve requires' in r['Motif'] for r in excluded))
+        self.assertTrue(any('A curve requires' in r['Reason'] for r in excluded))
 
 
 if __name__=='__main__':unittest.main()

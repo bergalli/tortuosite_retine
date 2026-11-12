@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import math
 import re
+import textwrap
 import zipfile
 from pathlib import Path
 
@@ -42,27 +43,26 @@ from tortuosite_score.vessels_detection.scoring import (
 RESULTS_SCHEMA_VERSION = 2
 VISIBLE_RESULT_COLUMNS = ["Label", "Vaisseau", "Categorie", "Longueur du trajet", "Corde", "Tortuosite"]
 STATS_EXPLANATION = (
-    "Chaque cellule compare l'image en ligne a l'image en colonne. Une petite p-value indique des preuves que "
-    "l'image en ligne a des valeurs de tortuosite plus elevees que l'image en colonne. Une grande p-value ne donne "
-    "pas de preuve forte dans ce sens."
+    "Each cell compares the row image with the column image. A small p-value provides evidence that "
+    "tortuosity values in the row image are higher than in the column image. A large p-value does not "
+    "provide strong evidence in this direction."
 )
 RAW_PVALUE_EXPLANATION = (
-    "Chaque cellule compare l'image en ligne a l'image en colonne avec un test de Mann-Whitney unilateral "
-    "sur les arteres classees de rang 1-3 et les veines scorees valides de l'onglet Clean_vessels de l'export brut "
-    "(alternative: la distribution des scores des vaisseaux valides de la ligne est plus elevee que celle de la "
-    "colonne). Ces p-values brutes repondent donc a une question simple: l'oeil de la ligne a-t-il des scores "
-    "globalement plus eleves que l'oeil de la colonne ?"
+    "Each cell compares the row image with the column image using a one-sided Mann-Whitney test "
+    "on classified rank 1–3 arteries and valid scored veins from the Clean_vessels sheet of the raw export "
+    "(alternative: the valid vessel score distribution in the row is higher than in the column). "
+    "These raw p-values ask whether the row eye has higher vessel scores overall than the column eye."
 )
 BH_PVALUE_EXPLANATION = (
-    "BH signifie Benjamini-Hochberg. Dans une matrice avec N images, on ne lit pas une seule comparaison mais "
-    "N x (N - 1) comparaisons directionnelles. Plus on regarde de comparaisons, plus on augmente la chance de voir "
-    "une petite p-value par hasard. La correction BH transforme les p-values brutes en p-values ajustees pour une "
-    "lecture globale de la matrice. Si une seule comparaison avait ete definie a l'avance, la p-value brute serait "
-    "suffisante; ici, les p-values BH sont plus adaptees pour reperer les contrastes robustes dans tout le tableau."
+    "BH stands for Benjamini-Hochberg. A matrix of N images contains N x (N - 1) directional comparisons. "
+    "Testing more comparisons increases the chance of observing a small p-value by chance. BH correction "
+    "adjusts raw p-values for interpretation across the whole matrix. If a single comparison had been "
+    "specified in advance, its raw p-value would suffice; here, BH-adjusted p-values are more appropriate "
+    "for identifying robust contrasts across the table."
 )
 SEGMENTATION_EXPLANATION = (
-    "Chaque image montre l'oeil original avec les vaisseaux sauvegardes superposes. Les labels V1, V2, etc. "
-    "correspondent aux lignes du tableau, qui resume la tortuosite de chaque vaisseau sauvegarde."
+    "Each image shows the original eye with saved vessels overlaid. Labels V1, V2, etc. correspond to "
+    "the table rows, which summarize the tortuosity of each saved vessel."
 )
 LOCAL_BUMP_METHOD_EXPLANATION = (
     "Le score actuel est calcule uniquement sur les vaisseaux sauvegardes. Ces vaisseaux peuvent avoir ete traces "
@@ -147,39 +147,39 @@ LOCAL_BUMP_LITERATURE = [
 
 MODEL_DESCRIPTION_BY_METHOD = {
     "arc_chord": [
-        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
-        "Pour chaque vaisseau, il reconstruit la ligne centrale ordonnee, mesure la longueur du trajet et la corde, puis calcule le rapport arc/chord.",
-        "Le seul pretraitement transversal est le filtre de petits vaisseaux si l'option est activee.",
+        "The model analyzes only vessels saved in the app.",
+        "For each vessel, it reconstructs the ordered centerline, measures path and chord lengths, then calculates the arc/chord ratio.",
+        "The only shared preprocessing step is the short vessel filter, when enabled.",
     ],
     "curvature_squared": [
-        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
-        "Pour chaque vaisseau, il reconstruit la ligne centrale ordonnee puis applique la formule T = (1 / L) integral kappa(s)^2 ds.",
-        "Le re-echantillonnage, quand il est actif, est un pretraitement numerique avant l'estimation des derivees; il ne change pas la formule appliquee ensuite.",
+        "The model analyzes only vessels saved in the app.",
+        "For each vessel, it reconstructs the ordered centerline and applies T = (1 / L) integral kappa(s)^2 ds.",
+        "When enabled, resampling is numerical preprocessing before derivative estimation; it does not change the formula applied afterward.",
     ],
     "tortuosity_density": [
-        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
-        "Il re-echantillonne et lisse la ligne centrale pour detecter les inflexions significatives, sans ajouter de parametre propre a cette methode.",
-        "Il mesure ensuite les arcs et les cordes sur la geometrie normalisee non lissee et applique tau_TD = ((n - 1) / L) x somme(L_i / C_i - 1).",
+        "The model analyzes only vessels saved in the app.",
+        "It resamples and smooths the centerline to detect significant inflections, without adding method-specific parameters.",
+        "It then measures arcs and chords on the unsmoothed normalized geometry and applies tau_TD = ((n - 1) / L) x sum(L_i / C_i - 1).",
     ],
     "external_angle_sum": [
-        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
-        "Il simplifie la ligne centrale normalisee avec l'algorithme de Ramer-Douglas-Peucker pour obtenir des points de flexion.",
-        "Il calcule ensuite l'angle externe theta_i a chaque point de flexion conserve et applique T = somme(theta_i), sans jamais estimer une courbure continue.",
+        "The model analyzes only vessels saved in the app.",
+        "It simplifies the normalized centerline using the Ramer-Douglas-Peucker algorithm to obtain bend points.",
+        "It then calculates the external angle theta_i at each retained bend point and applies T = sum(theta_i), without estimating continuous curvature.",
     ],
     "local_bump_v2": [
-        "Le modele experimental analyse les memes vaisseaux sauvegardes que le local-bump v1.",
-        "Il applique un lissage sans restauration des extremites, exclut la marge du filtre et supprime les lobes de courbure non persistants.",
-        "Il combine une composante d'oscillation persistante et une composante d'angularite; les deux composantes sont exportees pour audit.",
+        "The experimental model analyzes the same saved vessels as Local-bump v1.",
+        "It smooths without restoring endpoints, excludes the filter margin and removes non-persistent curvature lobes.",
+        "It combines persistent oscillation and angularity components; both components are exported for auditing.",
     ],
     "local_bump": [
-        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
-        "Pour chaque vaisseau, il re-echantillonne et lisse la ligne centrale, mesure les changements locaux d'angle, ignore les variations sous le seuil actif, puis compte les alternances de courbure.",
-        "Le score est concu pour valoriser les petites bosses et oscillations locales plutot qu'un grand virage regulier unique.",
+        "The model analyzes only vessels saved in the app.",
+        "For each vessel, it resamples and smooths the centerline, measures local angle changes, ignores changes below the active threshold and counts curvature alternations.",
+        "The score emphasizes small local bumps and oscillations over a single broad smooth bend.",
     ],
     "grisan": [
-        "Le modele analyse uniquement les vaisseaux sauvegardes dans l'app.",
-        "Il lisse la ligne centrale normalisee avec une spline cubique de lissage, puis calcule la courbure signee le long de cette spline.",
-        "Il decoupe le vaisseau en sous-segments de courbure de signe constant par hysteresis (deux seuils) et applique tau_Grisan = ((n - 1) / n) x (1 / L) x somme(L_i / C_i - 1) sur la geometrie lissee.",
+        "The model analyzes only vessels saved in the app.",
+        "It smooths the normalized centerline using a cubic smoothing spline, then calculates signed curvature along the spline.",
+        "It divides the vessel into subsegments with constant curvature sign using two-threshold hysteresis and applies tau_Grisan = ((n - 1) / n) x (1 / L) x sum(L_i / C_i - 1) on the smoothed geometry.",
     ],
 }
 
@@ -406,7 +406,7 @@ def generate_toolkit_pdf_archive(scored_runs, scoring_config, summary_table) -> 
     from tortuosite_score.visualization.toolkit_figures import toolkit_atlas_bytes
 
     if not scoring_config.method_id.startswith("toolkit_"):
-        raise ValueError("Les atlas detailles sont disponibles pour les methodes Toolkit.")
+        raise ValueError("Detailed atlases are available for Toolkit methods.")
     method_id = scoring_config.method_id
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -427,31 +427,31 @@ def _add_toolkit_audit_pages(pdf, config, scored_runs):
     import textwrap
     method = scoring_method_spec(config.method_id)
     fig = Figure(figsize=(8.27, 11.69))
-    fig.text(.08, .94, f"Calcul detaille : {method.label}", fontsize=16, weight="bold", va="top")
+    fig.text(.08, .94, f"Detailed calculation: {method.label}", fontsize=16, weight="bold", va="top")
     lines = [TOOLKIT_DESCRIPTION, "", *method.report_steps, "", *method.report_equations, "",
-             "Particularites conservees du code source :",
-             "SOAM : differences de directions sans correction du passage -180/+180 degres.",
-             "ASDC : gradient et integration par indice, divises par la corde (pas par L).",
-             "SCC : les choix de points et d'intersections du code source sont conserves.",
-             "TD et ICM : seules les portions acceptees par le code source sont comptees.",
-             "Les valeurs NA ne sont jamais remplacees par zero ni utilisees dans les statistiques.",
-             "La moyenne ponderee de l'oeil est une convention de l'app, pas du toolkit."]
+             "Preserved source code conventions:",
+             "SOAM: direction differences without -180/+180 degree wrap correction.",
+             "ASDC: index-based gradient and integration, divided by the chord (rather than L).",
+             "SCC: source code point and intersection choices are preserved.",
+             "TD and ICM: only portions accepted by the source code are counted.",
+             "NA values are never replaced by zero or included in statistics.",
+             "The weighted eye mean is an app convention, rather than a toolkit convention."]
     fig.text(.08, .87, "\n".join(textwrap.fill(line, 90) for line in lines), va="top", fontsize=9, linespacing=1.5)
     pdf.savefig(fig)
     invalid = []
     for run, _, table in scored_runs:
         for _, row in table.iterrows():
             if row.get("toolkit_status") != "ok" or row.get("toolkit_raw_status") != "ok":
-                invalid.append({"Image": run.name, "Vaisseau": row.get("vessel_name"),
-                    "Normalise": row.get("toolkit_status"), "Motif normalise": row.get("toolkit_failure_reason"),
-                    "Brut": row.get("toolkit_raw_status"), "Motif brut": row.get("toolkit_raw_failure_reason")})
+                invalid.append({"Image": run.name, "Vessel": row.get("vessel_name"),
+                    "Normalized": row.get("toolkit_status"), "Normalized reason": row.get("toolkit_failure_reason"),
+                    "Raw": row.get("toolkit_raw_status"), "Raw reason": row.get("toolkit_raw_failure_reason")})
     if not invalid:
         fig = Figure(figsize=(8.27, 11.69))
-        fig.text(.08, .93, "Audit toolkit : aucun echec de calcul.", fontsize=13)
+        fig.text(.08, .93, "Toolkit audit: no calculation failures.", fontsize=13)
         pdf.savefig(fig)
     for offset in range(0, len(invalid), 14):
         fig = Figure(figsize=(11.69, 8.27))
-        fig.text(.04, .95, f"Audit toolkit : {len(invalid)} vaisseaux avec echec (brut et/ou normalise)", fontsize=13)
+        fig.text(.04, .95, f"Toolkit audit: {len(invalid)} vessels with failures (raw and/or normalized)", fontsize=13)
         ax = fig.add_axes([.04, .06, .92, .82]); ax.axis("off")
         subset = pd.DataFrame(invalid[offset:offset+14]).map(lambda x: textwrap.fill(str(x), 32))
         table = ax.table(cellText=subset.values, colLabels=subset.columns,
@@ -546,13 +546,13 @@ def render_results_page(scoring_config: ScoringConfig | None = None) -> None:
         )
     if scoring_config.method_id.startswith("toolkit_"):
         st.download_button(
-            "Telecharger les 3 PDF (rapport + arteres + veines)",
+            "Download all 3 PDFs (report + arteries + veins)",
             data=lambda: generate_toolkit_pdf_archive(scored_runs, scoring_config, summary_table),
             file_name=f"rapports_tortuosite_{method.method_id}.zip",
             mime="application/zip",
             on_click="ignore",
             key=f"pdf_archive_{method.method_id}",
-            help="Un seul ZIP contenant le rapport et les deux atlas detailles pour la methode active. La generation demarre au clic et peut prendre quelques minutes.",
+            help="One ZIP containing the main report and detailed artery and vein atlases for the active method. Generation starts when clicked and may take a few minutes.",
         )
         from tortuosite_score.visualization.toolkit_figures import toolkit_diagnostics_bytes
         st.download_button(
@@ -571,7 +571,7 @@ def render_results_page(scoring_config: ScoringConfig | None = None) -> None:
                                file_name=f"audit_{method.method_id}.csv", mime="text/csv")
     else:
         st.download_button(
-            "Generer le rapport PDF",
+            "Download PDF report",
             data=_generate_local_bump_results_pdf_from_scores(scoring_config, scored_runs, summary_table),
             file_name=f"rapport_tortuosite_{method.method_id}.pdf",
             mime="application/pdf",
@@ -859,20 +859,19 @@ def _add_local_bump_cover_page(pdf: PdfPages, summary_table: pd.DataFrame, scori
     ax.axis("off")
     image_count = len(summary_table)
     lines = [
-        "Rapport de tortuosite retinienne",
+        "Retinal tortuosity report",
         "",
-        f"Methode actuelle: {method.report_method_title}",
+        f"Current method: {method.report_method_title}",
         "",
-        f"Images analysees: {image_count}",
+        f"Images analyzed: {image_count}",
         "",
-        "Objectif clinique:",
+        "Clinical objective:",
         method.short_description,
         "",
         "Important:",
-        "le calcul final ne score pas tout le squelette directement; il score seulement",
-        "les vaisseaux sauvegardes dans chaque session.",
+        "the final calculation scores only the vessels saved in each session.",
     ]
-    ax.text(0.08, 0.92, "\n".join(lines), va="top", fontsize=13)
+    ax.text(0.08, 0.92, "\n".join(textwrap.fill(line, 78) for line in lines), va="top", fontsize=13)
     pdf.savefig(fig, bbox_inches="tight")
 
 
@@ -885,11 +884,11 @@ def _add_model_description_page(
     fig = Figure(figsize=(8.27, 11.69))
     ax = fig.subplots()
     ax.axis("off")
-    ax.text(0.08, 0.94, "Modele et pretraitements", va="top", fontsize=16, fontweight="bold")
+    ax.text(0.08, 0.94, "Model and preprocessing", va="top", fontsize=16, fontweight="bold")
 
     description_lines = (
-        ["Vaisseaux sauvegardes normalises a 1024 px; aucun nouveau calcul de segmentation.",
-         "Recette batch du Curve Toolkit : lissage p=8/L, M=ceil(N/4), puis SCC.",
+        ["Saved vessels normalized to 1024 px; no segmentation is recomputed.",
+         "Curve Toolkit batch procedure: smoothing p=8/L, M=ceil(N/4), then SCC.",
          *method.report_equations]
         if method.method_id.startswith("toolkit_")
         else MODEL_DESCRIPTION_BY_METHOD.get(method.method_id, MODEL_DESCRIPTION_BY_METHOD["local_bump"])
@@ -897,30 +896,30 @@ def _add_model_description_page(
     ax.text(
         0.08,
         0.86,
-        "\n".join(f"- {line}" for line in description_lines),
+        "\n".join(textwrap.fill(f"- {line}", 88) for line in description_lines),
         va="top",
         fontsize=10,
         wrap=True,
     )
 
     parameter_lines = scoring_method_fixed_parameters(scoring_config)
-    parameter_text = ["Parametres actifs:"] + [f"- {name}: {value}" for name, value in parameter_lines]
-    ax.text(0.08, 0.62, "\n".join(parameter_text), va="top", fontsize=10)
+    parameter_text = ["Active parameters:"] + [f"- {name}: {value}" for name, value in parameter_lines]
+    ax.text(0.08, 0.62, "\n".join(textwrap.fill(line, 88) for line in parameter_text), va="top", fontsize=10)
 
     total_saved = _summary_column_total(summary_table, "Vaisseaux sauvegardes")
     total_kept = _summary_column_total(summary_table, "Vaisseaux retenus")
     if total_saved:
-        kept_line = f"Vaisseaux retenus pour les scores: {total_kept:.0f} / {total_saved:.0f}"
+        kept_line = f"Vessels included in scoring: {total_kept:.0f} / {total_saved:.0f}"
     else:
-        kept_line = "Vaisseaux retenus pour les scores: NA"
+        kept_line = "Vessels included in scoring: NA"
     ax.text(
         0.08,
         0.42,
         "\n".join(
             [
-                "Population analysee:",
+                "Analyzed population:",
                 kept_line,
-                "Les vaisseaux exclus par le filtre restent sauvegardes dans l'app, mais ne contribuent pas aux statistiques du rapport.",
+                textwrap.fill("Vessels excluded by the filter remain saved in the app but do not contribute to report statistics.", 88),
             ]
         ),
         va="top",
@@ -931,7 +930,7 @@ def _add_model_description_page(
     ax.text(
         0.08,
         0.23,
-        "Sortie principale du rapport: les matrices de p-values comparent les distributions de scores des vaisseaux retenus entre images.",
+        "Main report output: p-value matrices compare score distributions of included vessels between images.",
         va="top",
         fontsize=10,
         wrap=True,
@@ -1033,13 +1032,13 @@ def _add_local_bump_scores_page(
     fig = Figure(figsize=(11.69, 8.27))
     ax = fig.subplots()
     ax.axis("off")
-    ax.text(0.02, 0.98, "Resume des scores par image", va="top", fontsize=15, fontweight="bold")
+    ax.text(0.02, 0.98, "Score summary by image", va="top", fontsize=15, fontweight="bold")
     ax.text(
         0.02,
         0.92,
-        f"Ces statistiques descriptives sont calculees pour la methode `{method.label}` a partir des vaisseaux "
-        "retenus. Le tableau est trie par score moyen pondere; pour la comparaison principale entre yeux, les "
-        "p-values restent la sortie de reference.",
+        f"These descriptive statistics use the `{method.label}` method on included vessels. "
+        "The table is sorted by weighted mean score; p-values remain the reference "
+        "output for the main comparison between eyes.",
         va="top",
         fontsize=9,
         wrap=True,
@@ -1063,28 +1062,28 @@ def _add_local_bump_run_page(
     image_ax, text_ax = axes
     image_ax.axis("off")
     text_ax.axis("off")
-    image_ax.set_title(f"{run_dir.name} - vaisseaux sauvegardes scores", fontsize=13)
+    image_ax.set_title(f"{run_dir.name} - scored saved vessels", fontsize=13)
     top_systems = _top_system_rows(system_scores)
     overlay = _load_skeleton_report_image(run_dir, system_scores, top_systems)
     if overlay is not None:
         image_ax.imshow(overlay)
     else:
-        image_ax.text(0.5, 0.5, "Squelette non disponible", ha="center", va="center", fontsize=11)
+        image_ax.text(0.5, 0.5, "Skeleton unavailable", ha="center", va="center", fontsize=11)
 
     score_lines = [
-        str(summary.get("scoring_method_label", "Score principal")),
+        str(summary.get("scoring_method_label", "Primary score")),
         "",
-        f"Score median: {_format_pdf_value(descriptive_metrics.get('score_median'))}",
-        f"Score moyen: {_format_pdf_value(descriptive_metrics.get('score_mean'))}",
-        f"Score moyen pondere: {_format_pdf_value(descriptive_metrics.get('score_weighted_mean'))}",
-        "Vaisseaux retenus/sauvegardes: "
+        f"Median score: {_format_pdf_value(descriptive_metrics.get('score_median'))}",
+        f"Mean score: {_format_pdf_value(descriptive_metrics.get('score_mean'))}",
+        f"Weighted mean score: {_format_pdf_value(descriptive_metrics.get('score_weighted_mean'))}",
+        "Included/saved vessels: "
         f"{_kept_vessel_count_label(summary.get('eligible_vessel_count'), summary.get('saved_vessel_count'))}",
-        f"Longueur totale vaisseaux: {_format_pdf_value(descriptive_metrics.get('saved_total_length'))}",
-        f"Longueur totale vaisseaux retenus: {_format_pdf_value(descriptive_metrics.get('eligible_total_length'))}",
+        f"Total vessel length: {_format_pdf_value(descriptive_metrics.get('saved_total_length'))}",
+        f"Total included vessel length: {_format_pdf_value(descriptive_metrics.get('eligible_total_length'))}",
     ]
     text_ax.text(0.0, 0.98, "\n".join(score_lines), va="top", fontsize=11)
     top_table = _top_system_table(top_systems)
-    _draw_pdf_table(text_ax, top_table, title="Vaisseaux ayant le plus haut score", bbox=[0.0, 0.06, 1.0, 0.52])
+    _draw_pdf_table(text_ax, top_table, title="Highest-scoring vessels", bbox=[0.0, 0.06, 1.0, 0.52])
     pdf.savefig(fig, bbox_inches="tight")
 
 
@@ -1101,17 +1100,17 @@ def _add_all_systems_pdf_pages(
         fig = Figure(figsize=(11.69, 8.27))
         title_ax = fig.add_axes([0.02, 0.88, 0.96, 0.10])
         title_ax.axis("off")
-        title_ax.text(0.0, 1.0, "Atlas visuel des vaisseaux tries par tortuosite", va="top", fontsize=15, fontweight="bold")
+        title_ax.text(0.0, 1.0, "Visual atlas of vessels sorted by tortuosity", va="top", fontsize=15, fontweight="bold")
         title_ax.text(
             0.0,
             0.55,
-            "Chaque vignette montre un vaisseau sauvegarde retenu par la methode active, trie du plus au moins "
-            "tortueux. Le jaune correspond a la geometrie mesuree; la bordure indique le type: rouge = artere, bleu = veine.",
+            "Each thumbnail shows a saved vessel included by the active method, ordered from highest to lowest "
+            "tortuosity. Yellow shows the measured geometry; the border shows the type: red = artery, blue = vein.",
             va="top",
             fontsize=9,
             wrap=True,
         )
-        title_ax.text(0.0, 0.06, f"Page {page_index + 1}/{page_count} - {total_rows} vaisseaux", va="bottom", fontsize=8.5)
+        title_ax.text(0.0, 0.06, f"Page {page_index + 1}/{page_count} - {total_rows} vessels", va="bottom", fontsize=8.5)
 
         axes = fig.subplots(4, 3)
         fig.subplots_adjust(left=0.02, right=0.98, bottom=0.03, top=0.84, hspace=0.42, wspace=0.10)
@@ -1123,7 +1122,7 @@ def _add_all_systems_pdf_pages(
             if crop is not None:
                 ax.imshow(crop)
             else:
-                ax.text(0.5, 0.5, "Image non disponible", ha="center", va="center", fontsize=8)
+                ax.text(0.5, 0.5, "Image unavailable", ha="center", va="center", fontsize=8)
             title = (
                 f"#{int(row.get('Rang', 0))}  {row.get('Image', 'NA')}  {row.get('Vaisseau', 'NA')}\n"
                 f"score {_format_pdf_value(row.get('Score vaisseau'))} | "
@@ -1529,8 +1528,8 @@ def _add_cover_pdf_page(pdf: PdfPages, selected_run_names: list[str], counts_by_
     fig = Figure(figsize=(8.27, 11.69))
     ax = fig.subplots()
     ax.axis("off")
-    lines = ["Resultats de tortuosite retinienne", "", "Images incluses:"]
-    lines.extend(f"- {run_name}: {counts_by_run.get(run_name, 0)} vaisseaux sauvegardes" for run_name in selected_run_names)
+    lines = ["Retinal tortuosity results", "", "Included images:"]
+    lines.extend(f"- {run_name}: {counts_by_run.get(run_name, 0)} saved vessels" for run_name in selected_run_names)
     ax.text(0.08, 0.92, "\n".join(lines), va="top", fontsize=13)
     pdf.savefig(fig, bbox_inches="tight")
 
@@ -1539,13 +1538,13 @@ def _add_stats_pdf_page(pdf: PdfPages, raw_matrix: pd.DataFrame, adjusted_matrix
     _add_stats_matrix_pdf_page(
         pdf,
         raw_matrix,
-        title="P-values brutes",
+        title="Raw p-values",
         explanation=f"{STATS_EXPLANATION}\n\n{RAW_PVALUE_EXPLANATION}",
     )
     _add_stats_matrix_pdf_page(
         pdf,
         adjusted_matrix,
-        title="P-values ajustees (BH)",
+        title="BH-adjusted p-values",
         explanation=f"{STATS_EXPLANATION}\n\n{BH_PVALUE_EXPLANATION}",
     )
 
@@ -1592,10 +1591,25 @@ def _add_segmentation_pdf_page(pdf: PdfPages, run_name: str, overlay: Image.Imag
     table_ax.axis("off")
     image_ax.set_title(run_name, fontsize=13)
     image_ax.imshow(overlay)
-    table_ax.text(0.0, 0.98, "Resultats de segmentation", va="top", fontsize=13, fontweight="bold")
+    table_ax.text(0.0, 0.98, "Segmentation results", va="top", fontsize=13, fontweight="bold")
     table_ax.text(0.0, 0.91, SEGMENTATION_EXPLANATION, va="top", fontsize=8, wrap=True)
     _draw_pdf_table(table_ax, _format_table_for_display(result_table), title="", bbox=[0.0, 0.05, 1.0, 0.72])
     pdf.savefig(fig, bbox_inches="tight")
+
+
+PDF_COLUMN_LABELS = {
+    "Oeil": "Eye", "Vaisseau": "Vessel", "Categorie": "Category", "Methode": "Method",
+    "Score median": "Median score", "Score moyen": "Mean score",
+    "Score moyen pondere": "Weighted mean score", "Score vaisseau": "Vessel score",
+    "Vaisseaux retenus/sauvegardes": "Included/saved vessels",
+    "Longueur totale vaisseaux": "Total vessel length",
+    "Longueur totale vaisseaux retenus": "Total included vessel length",
+    "Longueur": "Length", "Longueur du trajet": "Path length", "Corde": "Chord",
+    "Tortuosite": "Tortuosity", "Rang": "Rank", "Ponts": "Bridges",
+    "Segments modele": "Model segments", "Segments manuels": "Manual segments",
+    "Composantes": "Components", "Statut du pont": "Bridge status",
+    "Debut": "Start", "Fin": "End",
+}
 
 
 def _draw_pdf_table(
@@ -1611,9 +1625,14 @@ def _draw_pdf_table(
     if title:
         ax.text(bbox[0], bbox[1] + bbox[3] + 0.035, title, fontsize=11, fontweight="bold")
     if table_df.empty:
-        ax.text(bbox[0], bbox[1] + bbox[3] / 2, "Aucune donnee", fontsize=9)
+        ax.text(bbox[0], bbox[1] + bbox[3] / 2, "No data", fontsize=9)
         return
     display_df = _format_table_for_display(table_df)
+    display_df = display_df.rename(columns=PDF_COLUMN_LABELS)
+    if "Category" in display_df.columns:
+        display_df["Category"] = display_df["Category"].replace(
+            {"artere": "artery", "veine": "vein", "indetermine": "undetermined"}
+        )
     table = ax.table(
         cellText=display_df.values,
         colLabels=list(display_df.columns),

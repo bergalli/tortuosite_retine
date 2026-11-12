@@ -86,8 +86,8 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
         label="Local-bump",
         primary_score_label="Score local-bump",
         eye_score_label="Score local-bump",
-        short_description="Mesure les bosses et oscillations locales d'un vaisseau sauvegarde.",
-        report_method_title="score local-bump sur vaisseaux sauvegardes",
+        short_description="Measures local bumps and oscillations in a saved vessel.",
+        report_method_title="Local-bump score on saved vessels",
         report_steps=(
             "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
             "2. Reconstituer la ligne centrale ordonnee de chaque vaisseau sauvegarde.",
@@ -113,8 +113,8 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
         label="Local-bump v2 (experimental)",
         primary_score_label="Score local-bump v2",
         eye_score_label="Score local-bump v2",
-        short_description="Combine les oscillations persistantes et l'angularite locale sans artefact aux extremites.",
-        report_method_title="score local-bump v2 experimental sur vaisseaux sauvegardes",
+        short_description="Combines persistent oscillations and local angularity without endpoint artifacts.",
+        report_method_title="Experimental Local-bump v2 score on saved vessels",
         report_steps=(
             "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
             "2. Reconstituer et normaliser la ligne centrale ordonnee.",
@@ -137,8 +137,8 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
         label="Arc/chord",
         primary_score_label="Score arc/chord",
         eye_score_label="Score arc/chord",
-        short_description="Mesure l'allongement global du trajet par rapport a sa corde.",
-        report_method_title="score arc/chord sur vaisseaux sauvegardes",
+        short_description="Measures overall path elongation relative to its chord.",
+        report_method_title="Arc/chord score on saved vessels",
         report_steps=(
             "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
             "2. Reconstituer la ligne centrale ordonnee de chaque vaisseau sauvegarde.",
@@ -155,11 +155,11 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
     ),
     "curvature_squared": ScoringMethodSpec(
         method_id="curvature_squared",
-        label="Courbure quadratique",
-        primary_score_label="Score courbure^2",
-        eye_score_label="Score courbure^2",
-        short_description="Mesure la moyenne de la courbure locale au carre le long du vaisseau.",
-        report_method_title="score de courbure quadratique sur vaisseaux sauvegardes",
+        label="Squared curvature",
+        primary_score_label="Squared curvature score",
+        eye_score_label="Squared curvature score",
+        short_description="Measures mean squared local curvature along the vessel.",
+        report_method_title="Squared curvature score on saved vessels",
         report_steps=(
             "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
             "2. Reconstituer la ligne centrale ordonnee de chaque vaisseau sauvegarde.",
@@ -182,8 +182,8 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
         label="Tortuosity Density",
         primary_score_label="Score Tortuosity Density",
         eye_score_label="Score Tortuosity Density",
-        short_description="Combine la frequence des inflexions et l'allongement de chaque courbure.",
-        report_method_title="score Tortuosity Density sur vaisseaux sauvegardes",
+        short_description="Combines inflection frequency and elongation of each bend.",
+        report_method_title="Tortuosity Density score on saved vessels",
         report_steps=(
             "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
             "2. Reconstituer la ligne centrale ordonnee de chaque vaisseau sauvegarde.",
@@ -202,11 +202,11 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
     ),
     "external_angle_sum": ScoringMethodSpec(
         method_id="external_angle_sum",
-        label="Somme des angles externes (RDP)",
-        primary_score_label="Score somme des angles externes",
-        eye_score_label="Score somme des angles externes",
-        short_description="Somme les angles externes aux points de flexion detectes par simplification Douglas-Peucker du trace du vaisseau.",
-        report_method_title="score de somme des angles externes (Ramer-Douglas-Peucker) sur vaisseaux sauvegardes",
+        label="External angle sum (RDP)",
+        primary_score_label="External angle sum score",
+        eye_score_label="External angle sum score",
+        short_description="Sums external angles at bend points detected by Douglas-Peucker simplification of the vessel path.",
+        report_method_title="External angle sum score (Ramer-Douglas-Peucker) on saved vessels",
         report_steps=(
             "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
             "2. Reconstituer la ligne centrale ordonnee de chaque vaisseau sauvegarde.",
@@ -230,11 +230,11 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
         primary_score_label="Score Grisan",
         eye_score_label="Score Grisan",
         short_description=(
-            "Formule originale de Grisan et al. (2008) : vaisseau lisse par spline cubique, "
-            "segmente par hysteresis sur le signe de la courbure, puis combine la longueur "
-            "d'arc relative de chaque segment et leur nombre."
+            "Original Grisan et al. (2008) formula: smooth the vessel with a cubic spline, "
+            "segment by curvature sign using hysteresis, then combine the relative "
+            "arc length of each segment and the number of segments."
         ),
-        report_method_title="score Grisan (2008) sur vaisseaux sauvegardes",
+        report_method_title="Grisan (2008) score on saved vessels",
         report_steps=(
             "1. Sauvegarder les vaisseaux manuellement ou avec le bouton d'auto-completion VascX.",
             "2. Reconstituer la ligne centrale ordonnee de chaque vaisseau sauvegarde.",
@@ -262,17 +262,17 @@ for _key, _registry_name in TOOLKIT_METRICS.items():
     SCORING_METHOD_SPECS[_id] = ScoringMethodSpec(
         method_id=_id, label=_label, primary_score_label=f"Score {_label}",
         eye_score_label=f"Score {_label}", short_description=TOOLKIT_DESCRIPTION,
-        report_method_title=f"{_label} sur vaisseaux sauvegardes",
+        report_method_title=f"{_label} on saved vessels",
         report_steps=(
-            "1. Reconstruire les vaisseaux sauvegardes sans modifier les traces.",
-            "2. Normaliser le diametre du fond d'oeil a 1024 px.",
-            "3. Lisser avec csaps p=8/L et M=ceil(N/4) points.",
-            "4. Appliquer la parametrisation SCC avec M points (code source conserve).",
-            "5. Calculer la metrique source; derivees avec smooth=1.0.",
-            "6. Exclure les scores non finis et les vaisseaux sous le seuil de longueur.",
-            "7. Agreger par moyenne ponderee par longueur (convention de l'app).",
+            "1. Reconstruct saved vessels without changing their paths.",
+            "2. Normalize the fundus diameter to 1024 px.",
+            "3. Smooth with csaps p=8/L and M=ceil(N/4) points.",
+            "4. Apply SCC parameterization with M points (source code preserved).",
+            "5. Calculate the source metric; derivatives use smooth=1.0.",
+            "6. Exclude non-finite scores and vessels below the length threshold.",
+            "7. Aggregate using a length-weighted mean (app convention).",
         ),
-        report_equations=(TOOLKIT_FORMULAS[_key], "S_oeil = somme(L_app x score_v) / somme(L_app)"),
+        report_equations=(TOOLKIT_FORMULAS[_key], "S_eye = sum(L_app x score_v) / sum(L_app)"),
     )
 
 
@@ -295,13 +295,13 @@ def scoring_method_fixed_parameters(config: ScoringConfig | None = None) -> list
     config = config or ScoringConfig()
     settings = config.local_bump_settings
     filter_label = (
-        f"actif, longueur minimale {settings.min_saved_vessel_length:.0f} px"
+        f"enabled, minimum length {settings.min_saved_vessel_length:.0f} px"
         if settings.filter_short_vessels
-        else "desactive"
+        else "disabled"
     )
     shared_parameters = [
-        ("Normalisation geometrie", f"diametre du fond d'oeil ramene a {REFERENCE_FUNDUS_DIAMETER:.0f} px"),
-        ("Filtre petits vaisseaux", filter_label.replace(" px", " px normalises")),
+        ("Geometry normalization", f"fundus diameter normalized to {REFERENCE_FUNDUS_DIAMETER:.0f} px"),
+        ("Short vessel filter", filter_label.replace(" px", " normalized px")),
     ]
     if config.method_id.startswith("toolkit_"):
         return [*shared_parameters, *TOOLKIT_PARAMETERS]
@@ -309,43 +309,43 @@ def scoring_method_fixed_parameters(config: ScoringConfig | None = None) -> list
         if config.method_id == "local_bump_v2":
             return [
                 *shared_parameters,
-                ("Pas de re-echantillonnage", f"{settings.resample_step:.1f} px"),
-                ("Fenetre de lissage", f"{settings.smoothing_window} points"),
-                ("Angle minimal d'un lobe persistant", f"{settings.min_persistent_lobe_angle:.3f} rad"),
-                ("Poids de l'angularite", f"{settings.local_bump_v2_angularity_weight:.2f}"),
+                ("Resampling step", f"{settings.resample_step:.1f} px"),
+                ("Smoothing window", f"{settings.smoothing_window} points"),
+                ("Minimum persistent lobe angle", f"{settings.min_persistent_lobe_angle:.3f} rad"),
+                ("Angularity weight", f"{settings.local_bump_v2_angularity_weight:.2f}"),
             ]
         return [
             *shared_parameters,
-            ("Pas de re-echantillonnage", f"{settings.resample_step:.1f} px"),
-            ("Fenetre de lissage", f"{settings.smoothing_window} points"),
+            ("Resampling step", f"{settings.resample_step:.1f} px"),
+            ("Smoothing window", f"{settings.smoothing_window} points"),
             (
-                "Seuil de courbure locale" if config.method_id == "local_bump" else "Seuil d'inflexion",
+                "Local curvature threshold" if config.method_id == "local_bump" else "Inflection threshold",
                 f"{settings.curvature_threshold:.3f} rad",
             ),
         ]
     if config.method_id == "curvature_squared":
         resampling_label = (
-            f"actif, pas {settings.resample_step:.1f} px"
+            f"enabled, step {settings.resample_step:.1f} px"
             if settings.resample_curvature_squared
-            else "desactive"
+            else "disabled"
         )
         return [
             *shared_parameters,
-            ("Pretraitement re-echantillonnage", resampling_label),
+            ("Resampling preprocessing", resampling_label),
         ]
     if config.method_id == "external_angle_sum":
         return [
             *shared_parameters,
-            ("Tolerance de simplification RDP", f"{settings.rdp_epsilon:.1f} px normalises"),
+            ("RDP simplification tolerance", f"{settings.rdp_epsilon:.1f} normalized px"),
         ]
     if config.method_id == "grisan":
         return [
             *shared_parameters,
-            ("Lissage de la spline cubique", f"s={settings.grisan_spline_smoothing:.1f}"),
+            ("Cubic spline smoothing", f"s={settings.grisan_spline_smoothing:.1f}"),
             (
-                "Seuils d'hysteresis sur la courbure",
-                f"bas={settings.grisan_curvature_hysteresis_low:.4f}, "
-                f"haut={settings.grisan_curvature_hysteresis_high:.4f}",
+                "Curvature hysteresis thresholds",
+                f"low={settings.grisan_curvature_hysteresis_low:.4f}, "
+                f"high={settings.grisan_curvature_hysteresis_high:.4f}",
             ),
         ]
     return shared_parameters

@@ -76,7 +76,7 @@ def compute(payload):
         sys.setprofile(None)
     return {
         "status": "ok" if math.isfinite(value) else "non_finite",
-        "reason": "" if math.isfinite(value) else "Resultat source non fini",
+        "reason": "" if math.isfinite(value) else "Non-finite source result",
         "value": value if math.isfinite(value) else math.nan, "diagnostics": diagnostics,
     }
 
