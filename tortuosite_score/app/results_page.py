@@ -12,6 +12,9 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 from PIL import Image, ImageDraw, ImageFont
 from scipy.stats import mannwhitneyu
+from tortuosite_score.vessels_detection.toolkit_metrics import (
+    DESCRIPTION as TOOLKIT_DESCRIPTION, AUDIT_COLUMNS as TOOLKIT_AUDIT_COLUMNS,
+)
 
 from tortuosite_score.app.constants import ARTERE_COLOR, VEINE_COLOR
 from tortuosite_score.app.review_data import list_runs, read_json
@@ -388,12 +391,75 @@ def _generate_local_bump_results_pdf_from_scores(
         _add_local_bump_scores_page(pdf, summary_table, scoring_config)
         for run_dir, summary, system_scores in scored_runs:
             _add_local_bump_run_page(pdf, run_dir, summary, system_scores)
+        if scoring_config.method_id.startswith("toolkit_"):
+            _add_toolkit_audit_pages(pdf, scoring_config, scored_runs)
         _add_all_systems_pdf_pages(
             pdf,
             _build_atlas_systems_table(scored_runs),
             {run_dir.name: system_scores for run_dir, _summary, system_scores in scored_runs},
         )
     return buffer.getvalue()
+
+
+def generate_toolkit_pdf_archive(scored_runs, scoring_config, summary_table) -> bytes:
+    """Build exactly three PDFs from one scored snapshot, only when requested."""
+    from tortuosite_score.visualization.toolkit_figures import toolkit_atlas_bytes
+
+    if not scoring_config.method_id.startswith("toolkit_"):
+        raise ValueError("Les atlas detailles sont disponibles pour les methodes Toolkit.")
+    method_id = scoring_config.method_id
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            f"rapport_tortuosite_{method_id}.pdf",
+            _generate_local_bump_results_pdf_from_scores(scoring_config, scored_runs, summary_table),
+        )
+        for vessel_type, suffix in (("artere", "arteres"), ("veine", "veines")):
+            archive.writestr(
+                f"atlas_{method_id}_{suffix}.pdf",
+                toolkit_atlas_bytes(scored_runs, scoring_config, vessel_type=vessel_type),
+            )
+    return buffer.getvalue()
+
+
+def _add_toolkit_audit_pages(pdf, config, scored_runs):
+    """Method and failure disclosure supplements the unchanged report structure."""
+    import textwrap
+    method = scoring_method_spec(config.method_id)
+    fig = Figure(figsize=(8.27, 11.69))
+    fig.text(.08, .94, f"Calcul detaille : {method.label}", fontsize=16, weight="bold", va="top")
+    lines = [TOOLKIT_DESCRIPTION, "", *method.report_steps, "", *method.report_equations, "",
+             "Particularites conservees du code source :",
+             "SOAM : differences de directions sans correction du passage -180/+180 degres.",
+             "ASDC : gradient et integration par indice, divises par la corde (pas par L).",
+             "SCC : les choix de points et d'intersections du code source sont conserves.",
+             "TD et ICM : seules les portions acceptees par le code source sont comptees.",
+             "Les valeurs NA ne sont jamais remplacees par zero ni utilisees dans les statistiques.",
+             "La moyenne ponderee de l'oeil est une convention de l'app, pas du toolkit."]
+    fig.text(.08, .87, "\n".join(textwrap.fill(line, 90) for line in lines), va="top", fontsize=9, linespacing=1.5)
+    pdf.savefig(fig)
+    invalid = []
+    for run, _, table in scored_runs:
+        for _, row in table.iterrows():
+            if row.get("toolkit_status") != "ok" or row.get("toolkit_raw_status") != "ok":
+                invalid.append({"Image": run.name, "Vaisseau": row.get("vessel_name"),
+                    "Normalise": row.get("toolkit_status"), "Motif normalise": row.get("toolkit_failure_reason"),
+                    "Brut": row.get("toolkit_raw_status"), "Motif brut": row.get("toolkit_raw_failure_reason")})
+    if not invalid:
+        fig = Figure(figsize=(8.27, 11.69))
+        fig.text(.08, .93, "Audit toolkit : aucun echec de calcul.", fontsize=13)
+        pdf.savefig(fig)
+    for offset in range(0, len(invalid), 14):
+        fig = Figure(figsize=(11.69, 8.27))
+        fig.text(.04, .95, f"Audit toolkit : {len(invalid)} vaisseaux avec echec (brut et/ou normalise)", fontsize=13)
+        ax = fig.add_axes([.04, .06, .92, .82]); ax.axis("off")
+        subset = pd.DataFrame(invalid[offset:offset+14]).map(lambda x: textwrap.fill(str(x), 32))
+        table = ax.table(cellText=subset.values, colLabels=subset.columns,
+                         colWidths=[.08, .16, .10, .28, .10, .28], loc="upper center", cellLoc="left")
+        table.auto_set_font_size(False); table.set_fontsize(7)
+        for cell in table.get_celld().values():
+            cell.set_height(.94 / (len(subset) + 1))
+        pdf.savefig(fig)
 
 
 def _local_bump_report_runs(run_dirs: list[Path]) -> list[Path]:
@@ -475,15 +541,41 @@ def render_results_page(scoring_config: ScoringConfig | None = None) -> None:
         st.download_button(
             "Telecharger tous les vaisseaux CSV",
             data=_public_systems_table(all_systems_table).to_csv(index=False).encode("utf-8"),
-            file_name="vaisseaux_tortuosite_tries.csv",
+            file_name=(f"vaisseaux_tortuosite_{method.method_id}.csv" if method.method_id.startswith("toolkit_") else "vaisseaux_tortuosite_tries.csv"),
             mime="text/csv",
         )
-    st.download_button(
-        "Generer le rapport PDF",
-        data=_generate_local_bump_results_pdf_from_scores(scoring_config, scored_runs, summary_table),
-        file_name=f"rapport_tortuosite_{method.method_id}.pdf",
-        mime="application/pdf",
-    )
+    if scoring_config.method_id.startswith("toolkit_"):
+        st.download_button(
+            "Telecharger les 3 PDF (rapport + arteres + veines)",
+            data=lambda: generate_toolkit_pdf_archive(scored_runs, scoring_config, summary_table),
+            file_name=f"rapports_tortuosite_{method.method_id}.zip",
+            mime="application/zip",
+            on_click="ignore",
+            key=f"pdf_archive_{method.method_id}",
+            help="Un seul ZIP contenant le rapport et les deux atlas detailles pour la methode active. La generation demarre au clic et peut prendre quelques minutes.",
+        )
+        from tortuosite_score.visualization.toolkit_figures import toolkit_diagnostics_bytes
+        st.download_button(
+            "Telecharger les calculs sources des atlas (JSON)",
+            data=lambda: toolkit_diagnostics_bytes(scored_runs, scoring_config),
+            file_name=f"diagnostics_{method.method_id}.json", mime="application/json",
+            on_click="ignore",
+        )
+        # Include invalid vessels in the audit download even when excluded from statistics.
+        audit_tables = [table.assign(run=run.name) for run, _, table in scored_runs if not table.empty]
+        if audit_tables:
+            audit = pd.concat(audit_tables, ignore_index=True)
+            audit = audit.drop(columns=["path_points", "start_endpoint", "end_endpoint"], errors="ignore")
+            st.download_button("Telecharger l'audit toolkit (tous les vaisseaux)",
+                               data=audit.to_csv(index=False).encode("utf-8"),
+                               file_name=f"audit_{method.method_id}.csv", mime="text/csv")
+    else:
+        st.download_button(
+            "Generer le rapport PDF",
+            data=_generate_local_bump_results_pdf_from_scores(scoring_config, scored_runs, summary_table),
+            file_name=f"rapport_tortuosite_{method.method_id}.pdf",
+            mime="application/pdf",
+        )
     st.download_button(
         "Generer les images arteres et veines",
         data=generate_vessel_type_segmentation_zip(scored_runs),
@@ -719,6 +811,7 @@ def _build_systems_table(
         for _, row in eligible.iterrows():
             rows.append(
                 {
+                    **{column: row.get(column) for column in TOOLKIT_AUDIT_COLUMNS if column in row},
                     "Image": run_dir.name,
                     "Oeil": summary.get("eye_number"),
                     "Vaisseau": row.get("vessel_name"),
@@ -794,7 +887,13 @@ def _add_model_description_page(
     ax.axis("off")
     ax.text(0.08, 0.94, "Modele et pretraitements", va="top", fontsize=16, fontweight="bold")
 
-    description_lines = MODEL_DESCRIPTION_BY_METHOD.get(method.method_id, MODEL_DESCRIPTION_BY_METHOD["local_bump"])
+    description_lines = (
+        ["Vaisseaux sauvegardes normalises a 1024 px; aucun nouveau calcul de segmentation.",
+         "Recette batch du Curve Toolkit : lissage p=8/L, M=ceil(N/4), puis SCC.",
+         *method.report_equations]
+        if method.method_id.startswith("toolkit_")
+        else MODEL_DESCRIPTION_BY_METHOD.get(method.method_id, MODEL_DESCRIPTION_BY_METHOD["local_bump"])
+    )
     ax.text(
         0.08,
         0.86,
@@ -862,6 +961,8 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
         "external_angle_sum": EXTERNAL_ANGLE_SUM_METHOD_EXPLANATION,
         "grisan": GRISAN_METHOD_EXPLANATION,
     }.get(method.method_id, LOCAL_BUMP_METHOD_EXPLANATION)
+    if method.method_id.startswith("toolkit_"):
+        explanation = TOOLKIT_DESCRIPTION
     ax.text(0.08, 0.88, explanation, va="top", fontsize=10, wrap=True)
     steps = list(method.report_steps)
     if method.method_id == "local_bump":
@@ -901,7 +1002,9 @@ def _add_local_bump_method_page(pdf: PdfPages, scoring_config: ScoringConfig) ->
     aggregation_explanation = HYBRID_SCORE_EXPLANATION if method.method_id == "local_bump" else LENGTH_WEIGHTED_SCORE_EXPLANATION
     ax.text(0.08, 0.34, aggregation_explanation, va="top", fontsize=9, wrap=True)
     ax.text(0.08, 0.24, "\n".join(method.report_equations), va="top", fontsize=8.3)
-    literature_lines = ["Litterature utilisee:"] + [f"- {item}" for item in LOCAL_BUMP_LITERATURE]
+    literature_lines = (["Source : Curve Toolkit", dict(scoring_method_fixed_parameters(scoring_config))["Source"]]
+                        if method.method_id.startswith("toolkit_")
+                        else ["Litterature utilisee:"] + [f"- {item}" for item in LOCAL_BUMP_LITERATURE])
     ax.text(0.08, 0.06, "\n".join(literature_lines), va="bottom", fontsize=8.2)
     pdf.savefig(fig, bbox_inches="tight")
 

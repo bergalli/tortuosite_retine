@@ -15,6 +15,7 @@ from scipy.stats import friedmanchisquare, mannwhitneyu, rankdata, spearmanr, wi
 
 from tortuosite_score.app.constants import PROJECT_ROOT
 from tortuosite_score.vessels_detection.scoring import ScoringConfig, score_run, scoring_method_spec
+from tortuosite_score.vessels_detection.toolkit_metrics import AUDIT_COLUMNS as TOOLKIT_AUDIT_COLUMNS
 
 CLINICAL_METADATA_PATH = PROJECT_ROOT / "demo" / "clinical_metadata.csv"
 SHEET_NAMES = ["Resume", "Par_oeil"]
@@ -191,10 +192,14 @@ def _classified_long_format(data: pd.DataFrame) -> pd.DataFrame:
     table["eye"] = table["eye"].replace({"OD": "right", "OG": "left"})
     table["vessel_type"] = table["vessel_type"].replace({"artere": "artery", "veine": "vein"})
     table["territory"] = table["territory"].replace({"inf": "inferior", "sup": "superior"})
-    return table[_raw_export_columns()]
+    for column in TOOLKIT_AUDIT_COLUMNS:
+        if column not in table:
+            table[column] = None
+    include_toolkit = "methode_id" in table and table["methode_id"].astype(str).str.startswith("toolkit_").any()
+    return table[_raw_export_columns(include_toolkit=include_toolkit)]
 
 
-def _raw_export_columns() -> list[str]:
+def _raw_export_columns(*, include_toolkit: bool = False) -> list[str]:
     return [
         # Subject and eye characteristics.
         "patient_id",
@@ -231,6 +236,7 @@ def _raw_export_columns() -> list[str]:
         "endpoint_max_turn",
         "model_segment_count",
         "manual_segment_count",
+        *(TOOLKIT_AUDIT_COLUMNS if include_toolkit else []),
     ]
 
 
@@ -308,6 +314,7 @@ def build_structured_vessel_data(
             )
             rows.append(
                 {
+                    **{column: score_row.get(column) for column in TOOLKIT_AUDIT_COLUMNS},
                     "patient_id": run_info.patient_id,
                     "groupe": run_info.group,
                     "oeil": run_info.eye,
@@ -840,6 +847,10 @@ def _arteries_vs_veins_sheet(data: pd.DataFrame) -> pd.DataFrame:
     eligibility_column = "eligible_analyse" if "eligible_analyse" in data else "eligible"
     eligible = data[eligibility_column].fillna(False).astype(bool) if eligibility_column in data else pd.Series(True, index=data.index)
     patient_data = data[(data["groupe"] == "patient") & eligible].copy()
+    if "methode_id" in patient_data:
+        toolkit = patient_data["methode_id"].astype(str).str.startswith("toolkit_")
+        finite = np.isfinite(pd.to_numeric(patient_data["score"], errors="coerce"))
+        patient_data = patient_data[~toolkit | finite].copy()
     rows: list[dict[str, object]] = []
     for (patient_id, eye, run), subset in patient_data.groupby(["patient_id", "oeil", "run"], dropna=False):
         veins = subset[subset["type_vaisseau"] == "veine"]
@@ -919,6 +930,10 @@ def _rank_eye_scores(data: pd.DataFrame) -> pd.DataFrame:
     eligibility_column = "eligible_analyse" if "eligible_analyse" in data else "eligible"
     eligible = data[eligibility_column].fillna(False).astype(bool) if eligibility_column in data else pd.Series(True, index=data.index)
     subset = data[(data["type_vaisseau"] == "artere") & (data["rang"].isin([1, 2, 3])) & eligible].copy()
+    if "methode_id" in subset:
+        toolkit = subset["methode_id"].astype(str).str.startswith("toolkit_")
+        finite = np.isfinite(pd.to_numeric(subset["score"], errors="coerce"))
+        subset = subset[~toolkit | finite].copy()
     rows: list[dict[str, object]] = []
     for (patient_id, group, eye, run, rank), group_df in subset.groupby(["patient_id", "groupe", "oeil", "run", "rang"], dropna=False):
         weighted_score = _weighted_group_score(group_df)
@@ -1307,6 +1322,7 @@ def _normalize_name(name: str) -> str:
 
 def _structured_columns() -> list[str]:
     return [
+        *TOOLKIT_AUDIT_COLUMNS,
         "patient_id",
         "groupe",
         "oeil",

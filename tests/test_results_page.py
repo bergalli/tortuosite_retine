@@ -41,6 +41,32 @@ from tortuosite_score.vessels_detection.segments import create_geometry_endpoint
 
 
 class ResultsPageTests(unittest.TestCase):
+    def test_toolkit_pdf_archive_download_is_single_click_and_deferred(self):
+        from unittest.mock import patch
+        from tortuosite_score.app import results_page as results
+        from tortuosite_score.vessels_detection.scoring import scoring_config
+        config=scoring_config('toolkit_dm')
+        scored=[];summary=pd.DataFrame({'Image':['1_OD']})
+        with patch.object(results,'st') as ui, \
+             patch.object(results,'list_runs',return_value=[Path('1_OD')]), \
+             patch.object(results,'_score_local_bump_report_runs',return_value=(config,scored,summary)), \
+             patch.object(results,'_build_all_systems_table',return_value=pd.DataFrame()), \
+             patch.object(results,'generate_vessel_type_segmentation_zip',return_value=b''), \
+             patch.object(results,'generate_clinical_excel_outputs',return_value=(b'',b'')), \
+             patch.object(results,'generate_toolkit_pdf_archive',return_value=b'zip') as generate:
+            results.render_results_page(config)
+            generate.assert_not_called()
+            downloads=[call.kwargs for call in ui.download_button.call_args_list
+                       if call.kwargs.get('mime')=='application/zip'
+                       and call.kwargs.get('file_name','').startswith('rapports_tortuosite_')]
+            self.assertEqual(len(downloads),1)
+            download=downloads[0]
+            self.assertTrue(callable(download['data']))
+            self.assertEqual(download['on_click'],'ignore')
+            self.assertEqual(download['data'](),b'zip')
+            generate.assert_called_once_with(scored,config,summary)
+            ui.button.assert_not_called()
+
     def test_build_result_rows_from_saved_vessels(self) -> None:
         review_state = {
             "manual_segments": {

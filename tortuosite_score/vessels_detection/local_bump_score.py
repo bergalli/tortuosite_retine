@@ -1726,6 +1726,8 @@ def _category_from_pixels(artery_pixels: int, vein_pixels: int) -> str:
 
 
 def parse_args() -> argparse.Namespace:
+    from tortuosite_score.vessels_detection.scoring import available_scoring_methods
+
     parser = argparse.ArgumentParser(description="Compute saved-vessel eye-level tortuosity from saved Streamlit runs.")
     parser.add_argument("runs_root", nargs="?", default="demo/streamlit_runs")
     parser.add_argument("--output", default="demo/local_bump_eye_scores.csv")
@@ -1734,15 +1736,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-all-runs", action="store_true")
     parser.add_argument(
         "--method",
-        choices=[
-            "local_bump",
-            "local_bump_v2",
-            "arc_chord",
-            "curvature_squared",
-            "tortuosity_density",
-            "external_angle_sum",
-            "grisan",
-        ],
+        choices=[method.method_id for method in available_scoring_methods()],
         default="local_bump",
     )
     parser.add_argument("--min-branch-length", type=float, default=DEFAULT_MIN_BRANCH_LENGTH)

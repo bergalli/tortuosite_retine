@@ -330,3 +330,24 @@ In this project, these papers motivate:
 - aggregating vessel-level measurements at eye level
 - validating against expert/clinical judgement
 - treating the current formula as a project-specific scoring rule rather than a direct copy of one published metric
+
+## Curve Toolkit metrics
+
+The sidebar also includes eleven methods sharing the **Toolkit —** prefix.
+They reuse saved vessel centerlines and the approved source batch recipe,
+without rerunning segmentation or replacing existing methods. Failures remain
+NA with an audit reason. Method details and preserved source quirks are in
+[`docs/toolkit-methods.md`](docs/toolkit-methods.md).
+
+Generate all eleven French reports and full artery atlases, plus CSV/Excel and
+source calculation diagnostics:
+
+```bash
+uv run python -m tortuosite_score.visualization.toolkit_export
+```
+
+Outputs are written to `paper_visualisations/toolkit/`. Use `--method td` to
+select one metric or `--run 1_OD` for one numbered eye. The Results page also has
+a single **Telecharger les 3 PDF (rapport + arteres + veines)** button for the
+active toolkit method. It downloads a ZIP with the main report and both detailed
+artery and vein atlases, generated when clicked.

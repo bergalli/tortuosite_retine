@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "csaps==1.3.3",
     "matplotlib>=3.10.9",
     "llvmlite==0.44.0",
     "numba==0.61.2",
@@ -15,7 +16,7 @@ dependencies = [
     "scikit-image>=0.26.0",
     "scipy>=1.17.1",
     "skan>=0.13.1",
-    "streamlit>=1.45.1",
+    "streamlit>=1.57.0",
 ]
 
 [project.optional-dependencies]

@@ -32,6 +32,12 @@ from tortuosite_score.vessels_detection.segments import (
     segment_ref_sort_key,
 )
 
+from tortuosite_score.vessels_detection.toolkit_metrics import (
+    METRICS as TOOLKIT_METRICS, FORMULAS as TOOLKIT_FORMULAS,
+    DESCRIPTION as TOOLKIT_DESCRIPTION, PARAMETERS as TOOLKIT_PARAMETERS,
+    AUDIT_COLUMNS as TOOLKIT_AUDIT_COLUMNS, toolkit_metrics, toolkit_audit,
+)
+
 ScoringMethodId = Literal[
     "local_bump",
     "local_bump_v2",
@@ -40,6 +46,17 @@ ScoringMethodId = Literal[
     "tortuosity_density",
     "external_angle_sum",
     "grisan",
+    "toolkit_dm",
+    "toolkit_mean_curvature",
+    "toolkit_total_curvature",
+    "toolkit_tau_3",
+    "toolkit_tau_5",
+    "toolkit_asdc",
+    "toolkit_icm",
+    "toolkit_soam",
+    "toolkit_td",
+    "toolkit_scc",
+    "toolkit_escc",
 ]
 DEFAULT_SCORING_METHOD: ScoringMethodId = "local_bump"
 
@@ -239,19 +256,28 @@ SCORING_METHOD_SPECS: dict[ScoringMethodId, ScoringMethodSpec] = {
 }
 
 
+for _key, _registry_name in TOOLKIT_METRICS.items():
+    _id = f"toolkit_{_key}"
+    _label = f"Toolkit — {_registry_name}"
+    SCORING_METHOD_SPECS[_id] = ScoringMethodSpec(
+        method_id=_id, label=_label, primary_score_label=f"Score {_label}",
+        eye_score_label=f"Score {_label}", short_description=TOOLKIT_DESCRIPTION,
+        report_method_title=f"{_label} sur vaisseaux sauvegardes",
+        report_steps=(
+            "1. Reconstruire les vaisseaux sauvegardes sans modifier les traces.",
+            "2. Normaliser le diametre du fond d'oeil a 1024 px.",
+            "3. Lisser avec csaps p=8/L et M=ceil(N/4) points.",
+            "4. Appliquer la parametrisation SCC avec M points (code source conserve).",
+            "5. Calculer la metrique source; derivees avec smooth=1.0.",
+            "6. Exclure les scores non finis et les vaisseaux sous le seuil de longueur.",
+            "7. Agreger par moyenne ponderee par longueur (convention de l'app).",
+        ),
+        report_equations=(TOOLKIT_FORMULAS[_key], "S_oeil = somme(L_app x score_v) / somme(L_app)"),
+    )
+
+
 def available_scoring_methods() -> list[ScoringMethodSpec]:
-    return [
-        SCORING_METHOD_SPECS[method_id]
-        for method_id in [
-            "local_bump",
-            "local_bump_v2",
-            "arc_chord",
-            "curvature_squared",
-            "tortuosity_density",
-            "external_angle_sum",
-            "grisan",
-        ]
-    ]
+    return list(SCORING_METHOD_SPECS.values())
 
 
 def scoring_method_spec(method_id: ScoringMethodId) -> ScoringMethodSpec:
@@ -277,6 +303,8 @@ def scoring_method_fixed_parameters(config: ScoringConfig | None = None) -> list
         ("Normalisation geometrie", f"diametre du fond d'oeil ramene a {REFERENCE_FUNDUS_DIAMETER:.0f} px"),
         ("Filtre petits vaisseaux", filter_label.replace(" px", " px normalises")),
     ]
+    if config.method_id.startswith("toolkit_"):
+        return [*shared_parameters, *TOOLKIT_PARAMETERS]
     if config.method_id in {"local_bump", "local_bump_v2", "tortuosity_density"}:
         if config.method_id == "local_bump_v2":
             return [
@@ -386,7 +414,13 @@ def score_saved_vessel(
     path_length = raw_path_length * scale if math.isfinite(raw_path_length) else math.nan
     chord_length = raw_chord_length * scale if math.isfinite(raw_chord_length) else math.nan
     arc_chord_value = float(diagnostic.get("tortuosity", local_metrics["arc_chord_tortuosity"]))
-    if config.method_id == "local_bump":
+    toolkit_result = toolkit_raw_result = None
+    if config.method_id.startswith("toolkit_"):
+        toolkit_result = toolkit_metrics(normalized_path_points, config.method_id)
+        toolkit_raw_result = toolkit_metrics(raw_path_points, config.method_id)
+        primary_score = toolkit_result["value"]
+        raw_primary_score = toolkit_raw_result["value"]
+    elif config.method_id == "local_bump":
         primary_score = float(local_metrics["branch_bump_score"])
         raw_primary_score = float(raw_local_metrics["branch_bump_score"])
     elif config.method_id == "local_bump_v2":
@@ -417,6 +451,7 @@ def score_saved_vessel(
         )
     )
     return {
+        **(toolkit_audit(toolkit_result, toolkit_raw_result) if toolkit_result is not None else {}),
         "vessel_id": int(vessel_id) if vessel_id is not None else math.nan,
         "vessel_name": vessel_name,
         "category": vessel.get("category", "unknown"),
@@ -553,6 +588,11 @@ def summarize_eye_score(
         eligible = vessel_scores[vessel_scores["eligible"]].copy()
     else:
         eligible = vessel_scores.copy()
+    if config.method_id.startswith("toolkit_") and not eligible.empty:
+        eligible = eligible[
+            eligible["score_geometry_valid"].fillna(False)
+            & np.isfinite(pd.to_numeric(eligible["primary_score"], errors="coerce"))
+        ].copy()
     result: dict[str, object] = {
         "scoring_method": method.method_id,
         "scoring_method_label": method.label,
@@ -677,7 +717,16 @@ def score_branch_fragments(
         density_metrics = tortuosity_density_metrics(row["path_points"], settings)
         angle_sum_metrics = external_angle_sum_metrics(row["path_points"], settings)
         grisan_result_metrics = grisan_metrics(row["path_points"], settings)
-        if config.method_id == "local_bump":
+        toolkit_columns = {}
+        if config.method_id.startswith("toolkit_"):
+            raw_points = np.asarray(row["path_points"], dtype=float)
+            normalized_points = raw_points * float(branches.attrs.get("coordinate_scale", 1.0))
+            toolkit_result = toolkit_metrics(normalized_points, config.method_id)
+            toolkit_raw_result = toolkit_metrics(raw_points, config.method_id)
+            primary_score = toolkit_result["value"]
+            toolkit_columns = toolkit_audit(toolkit_result, toolkit_raw_result)
+            toolkit_columns["raw_primary_score"] = toolkit_raw_result["value"]
+        elif config.method_id == "local_bump":
             primary_score = metrics["branch_bump_score"]
         elif config.method_id == "local_bump_v2":
             primary_score = v2_metrics["local_bump_v2_score"]
@@ -695,6 +744,7 @@ def score_branch_fragments(
             {
                 "run": run_name,
                 "eye_number": eye_number,
+                **toolkit_columns,
                 "branch_id": int(row["branch_id"]),
                 "category": row.get("vascx_category", "unknown"),
                 "scoring_method": method.method_id,
@@ -816,6 +866,10 @@ def build_manual_vessels_export(
                 "grisan_valid": row["grisan_valid"],
             }
         )
+    for exported, (_, score_row) in zip(rows, scores.iterrows()):
+        exported.update({column: score_row[column] for column in TOOLKIT_AUDIT_COLUMNS if column in score_row})
+        if config.method_id.startswith("toolkit_"):
+            exported["raw_primary_score"] = score_row["raw_primary_score"]
     export_df = pd.DataFrame(rows)
     if not export_df.empty:
         export_df = export_df.sort_values("vessel_name").reset_index(drop=True)
@@ -837,6 +891,9 @@ def build_review_scores_table(
                 "Categorie": row["category"],
                 "Methode": row["scoring_method_label"],
                 "Score principal": row["primary_score"],
+                **({"Statut toolkit": row.get("toolkit_status"),
+                    "Motif toolkit": row.get("toolkit_failure_reason")}
+                   if config.method_id.startswith("toolkit_") else {}),
                 "Local-bump v1 diagnostic": row["local_bump_score"] * DISPLAY_SCALE,
                 "Local-bump v2 diagnostic": row["local_bump_v2_score"],
                 "Arc/chord diagnostic": row["arc_chord_diagnostic"],

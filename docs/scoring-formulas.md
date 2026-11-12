@@ -8,11 +8,19 @@ skeleton. Geometry is normalized to a common fundus diameter, vessels shorter
 than the configured threshold are excluded, and the remaining vessel scores are
 aggregated at eye level.
 
-The seven implemented primary methods are Local-bump v1, Local-bump v2,
+The seven existing primary methods are Local-bump v1, Local-bump v2,
 Arc/chord, curvature-squared, Tortuosity Density, the RDP external-angle
 sum, and Grisan. Only Local-bump v1 uses an upper-tail component and a
 separate display multiplier at eye level. All other methods use a simple
 length-weighted mean.
+
+Eleven additional methods share the **Toolkit —** prefix: DM, mean curvature,
+total curvature, tau_3, tau_5, ASDC, ICM, SOAM, TD, SCC and ESCC. Their
+[source equations, batch preprocessing and preserved implementation quirks](toolkit-methods.md)
+are documented separately. They reuse the saved-vessel geometry and fundus
+normalization, apply their own source batch preprocessing, and use a
+length-weighted eye mean without a tail component or display multiplier.
+They do not replace the similarly named existing methods below.
 
 ## Common geometry and notation
 

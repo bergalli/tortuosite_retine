@@ -501,6 +501,7 @@ class CentralScoringServiceTests(unittest.TestCase):
                 "tortuosity_density",
                 "external_angle_sum",
                 "grisan",
+                *{f"toolkit_{name}" for name in ("dm", "mean_curvature", "total_curvature", "tau_3", "tau_5", "asdc", "icm", "soam", "td", "scc", "escc")},
             },
         )
 
