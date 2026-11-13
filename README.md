@@ -4,6 +4,8 @@ A Streamlit app that measures how tortuous (twisty) the blood vessels are in ret
 
 It segments the arteries and veins of an eye, lets you review and correct the detected vessels, then computes a tortuosity score per vessel and per eye. Results can be exported as CSV/Excel files and PDF reports.
 
+![Screenshot of the app](docs/screenshot.png)
+
 ## Getting started
 
 You need [uv](https://docs.astral.sh/uv/) and Python 3.11.
