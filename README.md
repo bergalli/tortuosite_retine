@@ -22,3 +22,7 @@ To use the deep-learning segmentation backends (DCP / VascX), install the extra 
 ```bash
 uv sync --extra deep
 ```
+
+## Credits
+
+The scoring methods prefixed with **Toolkit —** in the app come from [coconetlero/tortuosity_metrics_python](https://github.com/coconetlero/tortuosity_metrics_python).
